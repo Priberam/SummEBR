@@ -1,13 +1,10 @@
-from nltk.probability import log_likelihood
 import torch
-import torch.nn.functional as F
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer, get_linear_schedule_with_warmup
 from pytorch_lightning import LightningModule
 from datasets import load_metric
 import nltk
 import numpy as np
 import sys
-
 
 class BartSummarizer(LightningModule):
     def __init__(
@@ -19,8 +16,6 @@ class BartSummarizer(LightningModule):
         adam_epsilon: float = 1e-8,
         weight_decay: float = 0.0,
         batch_size: int = 32,
-        factual_reg: float = 0.0,
-        factual_loss_margin: float = 0.2,
         ofile: str = 'output.txt',
     ):
         super().__init__()
@@ -45,64 +40,34 @@ class BartSummarizer(LightningModule):
 
         self.metric = load_metric('rouge')
 
-    def forward(self, input_ids=None, attention_mask=None, decoder_input_ids=None, labels=None, encoder_outputs=None):
-        return self.bart(input_ids=input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids, labels=labels,
-                         encoder_outputs=encoder_outputs)
+    def forward(self, input_ids, attention_mask, decoder_input_ids=None, labels=None):
+        return self.bart(input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids, labels=labels)
 
-    def forward_and_loss(self, batch):
+    def training_step(self, batch, batch_idx):
         input_ids = batch['input_ids']
         attention_mask = batch['attention_mask']
         labels = batch['labels']
         decoder_input_ids = batch['decoder_input_ids']
-        claim_tok_pos = batch['claim_tok_pos0']
-        claim_tok_neg = batch['claim_tok_neg0']
 
-        outputs = self(input_ids=input_ids, attention_mask=attention_mask,
+        outputs = self(input_ids, attention_mask,
                        decoder_input_ids=decoder_input_ids, labels=labels)
-        ce_loss = outputs.loss
-
-        if self.hparams.factual_reg > 0:
-            encoder_outputs = (outputs.encoder_last_hidden_state, outputs.encoder_hidden_states, outputs.encoder_attentions)
-
-            outputs_pos = self(encoder_outputs=encoder_outputs,
-                               decoder_input_ids=claim_tok_pos, labels=claim_tok_pos)
-            logits_pos = outputs_pos.logits
-
-            outputs_neg = self(encoder_outputs=encoder_outputs,
-                               decoder_input_ids=claim_tok_neg, labels=claim_tok_neg)
-            logits_neg = outputs_neg.logits
-
-            fact_loss = self.factual_loss(logits_pos, logits_neg, claim_tok_pos, claim_tok_neg, margin=self.hparams.factual_loss_margin)
-            loss = ce_loss + self.hparams.factual_reg * fact_loss
-        else:
-            fact_loss = None
-            loss = ce_loss
-
-        return loss, ce_loss, fact_loss
-
-    def training_step(self, batch, batch_idx):
-        loss, ce_loss, fact_loss = self.forward_and_loss(batch)
-
-        if fact_loss is not None:
-            self.log('train_ce_loss', ce_loss, on_step=True,
-                    on_epoch=True, prog_bar=True, logger=True)
-            self.log('train_factual_loss', fact_loss, on_step=True,
-                    on_epoch=True, prog_bar=True, logger=True)
+        loss = outputs[0]
         self.log('train_loss', loss, on_step=True,
                  on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        loss, ce_loss, fact_loss = self.forward_and_loss(batch)
+        input_ids = batch['input_ids']
+        attention_mask = batch['attention_mask']
+        labels = batch['labels']
+        decoder_input_ids = batch['decoder_input_ids']
 
-        if fact_loss is not None:
-            self.log('val_ce_loss', ce_loss, on_step=True,
-                    on_epoch=True, prog_bar=True, logger=True)
-            self.log('val_factual_loss', fact_loss, on_step=True,
-                    on_epoch=True, prog_bar=True, logger=True)
-        self.log('val_loss', loss, on_step=True,
+        outputs = self(input_ids, attention_mask,
+                       decoder_input_ids=decoder_input_ids, labels=labels)
+        val_loss, logits = outputs[:2]
+        self.log('val_loss', val_loss, on_step=True,
                  on_epoch=True, prog_bar=True, logger=True)
-        return loss
+        return val_loss
 
     def test_step(self, batch, batch_idx):
         input_ids = batch['input_ids']
@@ -118,8 +83,7 @@ class BartSummarizer(LightningModule):
 
         if batch_idx == 0:
             with open(self.hparams.ofile, 'w') as f:
-                self.show_examples(
-                    input_ids.cpu(), labels.cpu(), preds=preds.cpu(), ofile=f)
+                self.show_examples(input_ids.cpu(), labels.cpu(), preds=preds.cpu(), ofile=f)
 
         return outputs
 
@@ -215,20 +179,6 @@ class BartSummarizer(LightningModule):
             pred != self.tokenizer.pad_token_id) for pred in preds]
         result['gen_len'] = np.mean(prediction_lens)
         return result
-
-    @staticmethod
-    def factual_loss(logits_pos, logits_neg, labels_pos, labels_neg, margin=0.1):
-        assert len(logits_pos) == len(logits_neg), 'Number of positive and negative examples must be the same.'
-
-        N, Lpos, _ = logits_pos.shape
-        Lneg = logits_neg.shape[1]
-        len_pos = torch.sum(labels_pos != -100, dim=1)
-        loss_pos = F.cross_entropy(logits_pos.reshape(
-            N*Lpos, -1), labels_pos.reshape(N*Lpos), reduction='none').reshape(N, Lpos).sum(dim=1) / len_pos
-        len_neg = torch.sum(labels_neg != -100, dim=1)
-        loss_neg = F.cross_entropy(logits_neg.reshape(
-            N*Lneg, -1), labels_neg.reshape(N*Lneg), reduction='none').reshape(N, Lneg).sum(dim=1) / len_neg
-        return torch.max(torch.zeros_like(loss_pos), loss_pos - loss_neg + margin).mean()
 
     def show_examples(self, input_ids, labels, preds=None, ofile=None):
 

@@ -2,7 +2,7 @@ import argparse
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from transformers import AutoTokenizer
-from dataset import CnnDmDataMod
+from dataset import CNN_DailyMail_DataModule
 from model import BartSummarizer
 
 
@@ -22,12 +22,8 @@ def main():
                         type=str, metavar='', help='path to config if not the same as model_name')
     parser.add_argument('--learning_rate', default=5e-5,
                         type=float, metavar='', help='learning rate')
-    parser.add_argument('--batch_size', default=3,
+    parser.add_argument('--batch_size', default=4,
                         type=int, metavar='', help='batch size')
-    parser.add_argument('--factual_reg', default=1e-1,
-                        type=float, metavar='', help='factual loss regularization weight')
-    parser.add_argument('--factual_loss_margin', default=0.2,
-                        type=float, metavar='', help='margin parameter for the factual loss')
     parser.add_argument('--checkpoint', default=None,
                         type=str, metavar='', help='checkpoint file')
     parser.add_argument('--do_train', dest='do_train', action='store_true')
@@ -40,7 +36,7 @@ def main():
         seed_everything(args.seed)
 
     tokenizer_name = args.tokenizer_name if args.tokenizer_name is not None else args.model_name_or_path
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
 
     model = BartSummarizer(
         args.model_name_or_path,
@@ -48,11 +44,9 @@ def main():
         config_name=args.config_name,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
-        factual_reg=args.factual_reg,
-        factual_loss_margin=args.factual_loss_margin,
     )
 
-    datamodule = CnnDmDataMod(
+    datamodule = CNN_DailyMail_DataModule(
         args.data_path,
         model.bart,
         tokenizer,
@@ -65,7 +59,7 @@ def main():
         checkpoint_callback = ModelCheckpoint(
             monitor='val_loss_epoch',
             dirpath=args.output,
-            filename="fact-summarizer-{epoch:02d}-{val_loss:.2f}",
+            filename="bart-summarizer-{epoch:02d}-{val_loss:.2f}",
             save_top_k=3,
             mode="min",
         )
