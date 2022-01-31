@@ -2,9 +2,14 @@ import torch
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer, get_linear_schedule_with_warmup
 from pytorch_lightning import LightningModule
 from datasets import load_metric
+from ctc_score import SummarizationScorer
+from questeval.questeval_metric import QuestEval
+from factsumm import FactSumm
 import nltk
 import numpy as np
 import sys
+import json
+from tqdm import tqdm
 
 class BartSummarizer(LightningModule):
     def __init__(
@@ -16,7 +21,11 @@ class BartSummarizer(LightningModule):
         adam_epsilon: float = 1e-8,
         weight_decay: float = 0.0,
         batch_size: int = 32,
-        ofile: str = 'output.txt',
+        num_beams: int = 1,
+        num_beam_groups: int = 1,
+        diversity_penalty: float = 0.0,
+        num_return_sequences: int = 1,
+        predictions_file: str = 'predict.jsonl',
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -38,53 +47,69 @@ class BartSummarizer(LightningModule):
             use_auth_token=None,
         )
 
-        self.metric = load_metric('rouge')
+        self.rouge = load_metric('rouge')
+        self.ctc_scorer = SummarizationScorer(align='D-cnndm')
+        self.questeval_scorer = QuestEval(task='summarization', do_weighter=True)
+        self.factsumm_scorer = FactSumm()
 
     def forward(self, input_ids, attention_mask, decoder_input_ids=None, labels=None):
         return self.bart(input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids, labels=labels)
 
     def training_step(self, batch, batch_idx):
-        input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
-        labels = batch['labels']
-        decoder_input_ids = batch['decoder_input_ids']
-
-        outputs = self(input_ids, attention_mask,
-                       decoder_input_ids=decoder_input_ids, labels=labels)
-        loss = outputs[0]
+        outputs = self(**batch)
+        loss = outputs.loss
         self.log('train_loss', loss, on_step=True,
                  on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
-        labels = batch['labels']
-        decoder_input_ids = batch['decoder_input_ids']
-
-        outputs = self(input_ids, attention_mask,
-                       decoder_input_ids=decoder_input_ids, labels=labels)
-        val_loss, logits = outputs[:2]
-        self.log('val_loss', val_loss, on_step=True,
-                 on_epoch=True, prog_bar=True, logger=True)
-        return val_loss
-
-    def test_step(self, batch, batch_idx):
-        input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
-        labels = batch['labels']
+        outputs = {}
+        outputs['val_loss'] = self(**batch).loss
 
         preds = self.bart.generate(
-            input_ids, attention_mask=attention_mask, max_length=1024)
+            batch['input_ids'],
+            attention_mask=batch['attention_mask'],
+            max_length=128).cpu()
+        outputs.update(
+            self.compute_metrics(
+                batch['input_ids'].cpu().numpy(),
+                preds.numpy(),
+                batch['labels'].cpu().numpy(),
+                metrics=['rouge', 'questeval']
+            )
+        )
+        outputs['batch_size'] = len(batch['input_ids'])
+
+        for key in outputs:
+            if key != 'batch_size':
+                self.log(key, outputs[key], on_step=True, on_epoch=True, prog_bar=True)
+
+        return outputs
+
+    def validation_epoch_end(self, outputs):
+        metrics = {}
+        n_examples = sum(x['batch_size'] for x in outputs)
+        for key in outputs[0].keys():
+            if key == 'batch_size':
+                continue
+            metrics[key] = sum(x[key] * x['batch_size']
+                               for x in outputs) / n_examples
+        self.log_dict(metrics)
+        return metrics
+
+    def test_step(self, batch, batch_idx):
+        preds = self.bart.generate(
+            batch['input_ids'],
+            attention_mask=batch['attention_mask'],
+            max_length=128).cpu()
+        input_ids = batch['input_ids'].cpu()
+        labels = batch['labels'].cpu()
 
         outputs = self.compute_metrics(
-            (preds.cpu().numpy(), labels.cpu().numpy()))
+            input_ids.numpy(), preds.numpy(), labels.numpy(),
+            metrics=['rouge', 'questeval', 'ctc']
+        )
         outputs['batch_size'] = len(input_ids)
-
-        if batch_idx == 0:
-            with open(self.hparams.ofile, 'w') as f:
-                self.show_examples(input_ids.cpu(), labels.cpu(), preds=preds.cpu(), ofile=f)
-
         return outputs
 
     def test_epoch_end(self, outputs):
@@ -97,6 +122,46 @@ class BartSummarizer(LightningModule):
                                for x in outputs) / n_examples
         self.log_dict(metrics)
         return metrics
+
+    def on_predict_start(self):
+        self._predict_f = open(self.hparams.predictions_file, 'w', encoding='utf-8')
+
+    def predict_step(self, batch, batch_idx):
+        preds = self.bart.generate(
+            batch['input_ids'],
+            attention_mask=batch['attention_mask'],
+            num_beams=self.hparams.num_beams,
+            num_beam_groups=self.hparams.num_beam_groups,
+            diversity_penalty=self.hparams.diversity_penalty,
+            num_return_sequences=self.hparams.num_return_sequences,
+        ).cpu().numpy()
+        input_ids = batch['input_ids'].cpu().numpy()
+        labels = [np.where(label != -100, label, self.tokenizer.pad_token_id)
+                  for label in batch['labels'].cpu().numpy()]
+
+        decoded_inputs = self.tokenizer.batch_decode(
+            input_ids, skip_special_tokens=True)
+        decoded_preds = self.tokenizer.batch_decode(
+            preds, skip_special_tokens=True)
+        decoded_labels = self.tokenizer.batch_decode(
+            labels, skip_special_tokens=True)
+
+        if self.hparams.num_return_sequences > 1:
+            decoded_preds = [decoded_preds[j : j+self.hparams.num_return_sequences]
+                             for j in range(0, len(decoded_preds), self.hparams.num_return_sequences)]
+
+        for inpt, pred, label in zip(decoded_inputs, decoded_preds, decoded_labels):
+            example = {'text': inpt, 'gold_summary': label}
+            if self.hparams.num_return_sequences == 1:
+                example['gen_summary'] = pred
+            else:
+                pred = list(set(pred))
+                for j in range(len(pred)):
+                    example[f'gen_summary{j}'] = pred[j]
+            self._predict_f.write(json.dumps(example, ensure_ascii=False) + '\n')
+
+    def on_predict_end(self):
+        self._predict_f.close()
 
     def setup(self, stage=None) -> None:
         if stage != 'fit':
@@ -138,47 +203,166 @@ class BartSummarizer(LightningModule):
                      'interval': 'step', 'frequency': 1}
         return [optimizer], [scheduler]
 
-    metric = load_metric("rouge")
-
     @staticmethod
-    def postprocess_text(preds, labels):
+    def postprocess_text(inputs, preds, labels):
+        inputs = [inpt.strip() for inpt in inputs]
         preds = [pred.strip() for pred in preds]
         labels = [label.strip() for label in labels]
 
         # rougeLSum expects newline after each sentence
+        inputs = ["\n".join(nltk.sent_tokenize(inpt)) for inpt in inputs]
         preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
         labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
 
-        return preds, labels
+        return inputs, preds, labels
 
-    def compute_metrics(self, eval_preds):
-        preds, labels = eval_preds
-        if isinstance(preds, tuple):
-            preds = preds[0]
-        decoded_preds = self.tokenizer.batch_decode(
-            preds, skip_special_tokens=True)
-        # Replace -100 in the labels as we can't decode them.
-        labels = [np.where(label != -100, label,
-                           self.tokenizer.pad_token_id) for label in labels]
-        decoded_labels = self.tokenizer.batch_decode(
-            labels, skip_special_tokens=True)
+    def compute_metrics(self, input_ids, preds, labels, metrics=None, input_is_text=False):
+        result = {}
+
+        if not input_is_text:
+            decoded_inputs = self.tokenizer.batch_decode(
+                input_ids, skip_special_tokens=True)
+            decoded_preds = self.tokenizer.batch_decode(
+                preds, skip_special_tokens=True)
+            # Replace -100 in the labels as we can't decode them.
+            labels = [np.where(label != -100, label,
+                            self.tokenizer.pad_token_id) for label in labels]
+            decoded_labels = self.tokenizer.batch_decode(
+                labels, skip_special_tokens=True)
+
+            prediction_lens = [np.count_nonzero(
+                pred != self.tokenizer.pad_token_id) for pred in preds]
+            result['gen_len'] = np.mean(prediction_lens)
+        else:
+            decoded_inputs, decoded_preds, decoded_labels = input_ids, preds, labels
+            preds_tok = self.tokenizer(decoded_preds)['input_ids']
+            prediction_lens = [len(pred) for pred in preds_tok]
+            result['gen_len'] = np.mean(prediction_lens)
 
         # Some simple post-processing
-        decoded_preds, decoded_labels = self.postprocess_text(
-            decoded_preds, decoded_labels)
+        decoded_inputs, decoded_preds, decoded_labels = self.postprocess_text(
+            decoded_inputs, decoded_preds, decoded_labels)
 
-        result = self.metric.compute(predictions=decoded_preds,
-                                     references=decoded_labels,
-                                     use_stemmer=True, use_agregator=False)
+        if metrics is None or 'rouge' in metrics:
+            # Extract a few results from ROUGE
+            rouge_scores = self.rouge.compute(predictions=decoded_preds,
+                                              references=decoded_labels,
+                                              use_stemmer=True, use_agregator=False)
 
-        # Extract a few results from ROUGE
-        result = {key: sum(x.fmeasure * 100 for x in lst)/len(lst)
-                  for key, lst in result.items()}
+            result.update({key: sum(x.fmeasure * 100 for x in lst)/len(lst)
+                           for key, lst in rouge_scores.items()})
 
-        prediction_lens = [np.count_nonzero(
-            pred != self.tokenizer.pad_token_id) for pred in preds]
-        result['gen_len'] = np.mean(prediction_lens)
+            rouge_source = self.rouge.compute(predictions=decoded_preds,
+                                              references=decoded_labels,
+                                              use_stemmer=True, use_agregator=False)
+            result.update(
+                {key+'_prec_src': sum(x.precision * 100  for x in lst)/len(lst)
+                 for key, lst in rouge_source.items()}
+            )
+
+        if metrics is None or 'ctc' in metrics:
+            consistency_scores, relevance_scores = [], []
+            for inpt, pred, label in zip(decoded_inputs, decoded_preds, decoded_labels):
+                inpt = self.replace_special_chars(inpt)
+                pred = self.replace_special_chars(pred)
+                label = self.replace_special_chars(label)
+
+                try:
+                    consistency = self.ctc_scorer.score(doc=inpt, refs=[], hypo=pred, aspect='consistency')
+                    relevance = self.ctc_scorer.score(doc=inpt, refs=[label], hypo=pred, aspect='relevance')
+                    consistency_scores.append(consistency if consistency is not None else 0)
+                    relevance_scores.append(relevance if relevance is not None else 0)
+                except:
+                    print('Couldn\'t compute CTC scores for the current example. Skipping it.')
+            result['ctc_consistency'] = np.mean(consistency_scores)
+            result['ctc_relevance'] = np.mean(relevance_scores)
+
+        if metrics is None or 'questeval' in metrics:
+            result['questeval'] = self.questeval_scorer.corpus_questeval(
+                hypothesis=decoded_preds,
+                sources=decoded_inputs)['corpus_score']
+
+        if metrics is None or 'factsumm' in metrics:
+            rouge, open_fact, closed_fact, qags = [], [], [], []
+            for inpt, pred, label in zip(decoded_inputs, decoded_preds, decoded_labels):
+                rouge.append(self.factsumm_scorer.calculate_rouge(label, pred))
+                open_fact.append(self.factsumm_scorer.extract_triples(inpt, pred, verbose=False))
+                closed_fact.append(self.factsumm_scorer.extract_facts(inpt, pred, device='cuda', verbose=False))
+                qags.append(self.factsumm_scorer.extract_qas(inpt, pred, device='cuda', verbose=False))
+
+            result['factsumm_rouge1'] = np.mean([x[0] for x in rouge])
+            result['factsumm_rouge2'] = np.mean([x[1] for x in rouge])
+            result['factsumm_rougeL'] = np.mean([x[2] for x in rouge])
+            result['factsumm_openfact'] = np.mean(open_fact)
+            result['factsumm_closedfact'] = np.mean([x[2] for x in closed_fact])
+            result['factsumm_qags'] = np.mean(qags)
+
         return result
+
+    @staticmethod
+    def replace_special_chars(text):
+        text = text.replace('â‚¬', '€')
+        text = text.replace('â', 'a')
+        text = text.replace('Â', 'A')
+        text = text.replace('å', 'a')
+        text = text.replace('Å', 'A')
+        text = text.replace('ă', 'a')
+        text = text.replace('Ă', 'A')
+        text = text.replace('ä', 'a')
+        text = text.replace('Ä', 'A')
+        text = text.replace('č', 'c')
+        text = text.replace('Č', 'C')
+        text = text.replace('ď', 'd')
+        text = text.replace('Ď', 'D')
+        text = text.replace('ě', 'e')
+        text = text.replace('Ě', 'E')
+        text = text.replace('ę', 'e')
+        text = text.replace('Ę', 'E')
+        text = text.replace('ê', 'e')
+        text = text.replace('Ê', 'E')
+        text = text.replace('ễ', 'e')
+        text = text.replace('Ễ', 'E')
+        text = text.replace('ǧ', 'g')
+        text = text.replace('Ǧ', 'G')
+        text = text.replace('ị', 'i')
+        text = text.replace('Ị', 'I')
+        text = text.replace('ľ', 'l')
+        text = text.replace('Ľ', 'L')
+        text = text.replace('ň', 'n')
+        text = text.replace('Ň', 'N')
+        text = text.replace('ö', 'ö')
+        text = text.replace('Ö', 'O')
+        text = text.replace('ř', 'r')
+        text = text.replace('Ř', 'R')
+        text = text.replace('š', 's')
+        text = text.replace('Š', 'S')
+        text = text.replace('ś', 's')
+        text = text.replace('Ś', 'S')
+        text = text.replace('ť', 't')
+        text = text.replace('Ť', 'T')
+        text = text.replace('ü', 'u')
+        text = text.replace('Ü', 'U')
+        text = text.replace('ủ', 'u')
+        text = text.replace('Ủ', 'U')
+        text = text.replace('ů', 'u')
+        text = text.replace('Ů', 'U')
+        text = text.replace('ý', 'y')
+        text = text.replace('Ý', 'Y')
+        text = text.replace('ŷ', 'y')
+        text = text.replace('Ŷ', 'Y')
+        text = text.replace('ž', 'z')
+        text = text.replace('Ž', 'Z')
+        text = text.replace('¥', 'Y')
+        text = text.replace('½', '1/2')
+        text = text.replace('¼', '1/4')
+        text = text.replace('¾', '3/4')
+        text = text.replace('¹', '1')
+        text = text.replace('²', '2')
+        text = text.replace('³', '3')
+        text = text.replace('⁴', '4')
+        text = text.replace('⁄', '/')
+        text = text.replace('˚', 'deg')
+        return text
 
     def show_examples(self, input_ids, labels, preds=None, ofile=None):
 
@@ -210,3 +394,33 @@ class BartSummarizer(LightningModule):
                 print(f'Gen. summary {i}:', file=ofile)
                 print(pred, file=ofile)
                 print(file=ofile)
+
+    def testfromjson(self, filename, batch_size):
+        with open(filename, 'r', encoding='utf-8') as fd:
+            lines = fd.readlines()
+        examples = [json.loads(line) for line in tqdm(lines)]
+
+        outputs, input_batch, pred_batch, label_batch = [], [], [], []
+        for example in tqdm(examples):
+            input_batch.append(example['text'])
+            pred_batch.append(example['gen_summary'])
+            label_batch.append(example['gold_summary'])
+
+            if len(input_batch) == batch_size:
+                output = self.compute_metrics(input_batch, pred_batch, label_batch, metrics=['rouge', 'questeval', 'ctc'], input_is_text=True)
+                output['batch_size'] = batch_size
+                outputs.append(output)
+                input_batch, pred_batch, label_batch = [], [], []
+        if(input_batch):
+            output = self.compute_metrics(input_batch, pred_batch, label_batch, metrics=['rouge', 'questeval', 'ctc'], input_is_text=True)
+            output['batch_size'] = len(input_batch)
+            outputs.append(output)
+
+        metrics = {}
+        n_examples = sum(x['batch_size'] for x in outputs)
+        for key in outputs[0].keys():
+            if key == 'batch_size':
+                continue
+            metrics[key] = sum(x[key] * x['batch_size']
+                               for x in outputs) / n_examples
+        return metrics

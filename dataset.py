@@ -5,8 +5,9 @@ from torch.utils.data import Dataset
 from datasets import load_from_disk
 from transformers import AutoTokenizer, DataCollatorForSeq2Seq, AutoModelForSeq2SeqLM
 import numpy as np
+from datasets.fingerprint import Hasher
 
-class CNN_DailyMail_DataModule(LightningDataModule):
+class CnnDmDataMod(LightningDataModule):
 
     loader_columns = [
         'article', 'highlights'
@@ -31,17 +32,15 @@ class CNN_DailyMail_DataModule(LightningDataModule):
             model=model
         )
 
-    def setup(self, stage: str):
         self.dataset = load_from_disk(self.path)
+        self.dataset = self.dataset.filter(
+            lambda x, idx: True if idx < 32 else False, with_indices=True)
 
-        print('Setup start...')
         for split in self.dataset.keys():
-            # self.dataset[split] = self.dataset[split].filter(
-            #     lambda x, idx: True if idx < 32 else False, with_indices=True)
             self.dataset[split] = self.dataset[split].map(
                 self.convert_to_features,
                 batched=True,
-                batch_size=(1000 // self.batch_size) * self.batch_size,
+                batch_size=1000,
                 remove_columns=['id'],
             )
             self.columns = [
@@ -51,7 +50,6 @@ class CNN_DailyMail_DataModule(LightningDataModule):
 
         self.eval_splits = [
             x for x in self.dataset.keys() if 'validation' in x]
-        print('Setup done!')
 
     def train_dataloader(self):
         return DataLoader(self.dataset['train'], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=True)
@@ -69,7 +67,7 @@ class CNN_DailyMail_DataModule(LightningDataModule):
             return [DataLoader(self.dataset[x], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=False) for x in self.eval_splits]
 
     def convert_to_features(self, example_batch, indices=None):
-        # Tokenize the text
+        '''Tokenize the articles and summaries'''
         inputs = self.tokenizer(
             example_batch['article'], max_length=self.max_seq_length, padding=False, truncation=True
         )
