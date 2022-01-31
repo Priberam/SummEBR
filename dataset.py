@@ -1,11 +1,8 @@
 from torch.utils.data import DataLoader
-from pytorch_lightning import LightningDataModule, LightningModule
+from pytorch_lightning import LightningDataModule
 import torch
-from torch.utils.data import Dataset
 from datasets import load_from_disk
 from transformers import AutoTokenizer, DataCollatorForSeq2Seq, AutoModelForSeq2SeqLM
-import numpy as np
-from datasets.fingerprint import Hasher
 
 class CnnDmDataMod(LightningDataModule):
 
