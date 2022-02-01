@@ -467,3 +467,25 @@ class BertRanker(LightningModule):
             inputs_embeds=inputs_embeds,
         )
 
+    def listmle_loss(self, scores, num_candidates, infty=1e9):
+        N = len(num_candidates)
+        L = len(scores)
+        mask = torch.arange(L).unsqueeze(0).repeat(N, 1).to(num_candidates.device)
+        mask -= num_candidates.unsqueeze(1)
+        mask = (mask < 0)
+
+        loss = 0.
+        for i, _ in enumerate(scores):
+            all_masks = mask[:, i:]
+            all_scores = torch.stack(scores[i:], dim=1)
+            all_scores -= all_scores.max(dim=1, keepdim=True).values
+            all_scores[~all_masks] = -infty
+            top_score = all_scores[:, 0]
+            loss_per_example = all_scores.logsumexp(dim=1) - top_score
+            loss_per_example[~mask[:, i]] = 0
+            num_valid = mask[:, i].long().sum()
+            loss += loss_per_example.sum() / num_valid
+        loss /= L
+
+        return loss
+
