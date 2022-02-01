@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer, get_linear_schedule_with_warmup
+from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
 from pytorch_lightning import LightningModule
 from datasets import load_metric
 from ctc_score import SummarizationScorer
@@ -424,3 +424,46 @@ class BartSummarizer(LightningModule):
             metrics[key] = sum(x[key] * x['batch_size']
                                for x in outputs) / n_examples
         return metrics
+
+
+class BertRanker(LightningModule):
+    def __init__(
+        self,
+        model_name_or_path: str,
+        tokenizer: AutoTokenizer = None,
+        config_name: str = None,
+        learning_rate: float = 2e-5,
+        adam_epsilon: float = 1e-8,
+        weight_decay: float = 0.0,
+        batch_size: int = 32,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.tokenizer = tokenizer
+        config_name = config_name if config_name is not None else model_name_or_path
+        config = AutoConfig.from_pretrained(config_name)
+        self.bert = BertForSequenceClassification.from_pretrained(
+            model_name_or_path,
+            config=config,
+            num_labels=1,
+        )
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+    ):
+        return self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+        )
+
