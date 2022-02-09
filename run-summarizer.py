@@ -87,8 +87,7 @@ def main():
         trainer = Trainer.from_argparse_args(args, callbacks=[checkpoint_callback, lr_monitor])
         trainer.fit(model, datamodule=datamodule)
 
-        if args.do_eval:
-            checkpoint = checkpoint_callback.best_model
+        checkpoint = checkpoint_callback.best_model_path
 
     if args.do_eval:
         if checkpoint is not None:

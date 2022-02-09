@@ -1,10 +1,12 @@
 import torch
+import torch.nn.functional as F
 from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer, BertForSequenceClassification, get_linear_schedule_with_warmup
 from pytorch_lightning import LightningModule
 from datasets import load_metric
 from ctc_score import SummarizationScorer
 from questeval.questeval_metric import QuestEval
 from factsumm import FactSumm
+from sklearn import metrics
 import nltk
 import numpy as np
 import sys
@@ -88,12 +90,12 @@ class BartSummarizer(LightningModule):
 
     def validation_epoch_end(self, outputs):
         metrics = {}
-        n_examples = sum(x['batch_size'] for x in outputs)
+        num_examples = sum(x['batch_size'] for x in outputs)
         for key in outputs[0].keys():
             if key == 'batch_size':
                 continue
             metrics[key] = sum(x[key] * x['batch_size']
-                               for x in outputs) / n_examples
+                               for x in outputs) / num_examples
         self.log_dict(metrics)
         return metrics
 
@@ -114,12 +116,12 @@ class BartSummarizer(LightningModule):
 
     def test_epoch_end(self, outputs):
         metrics = {}
-        n_examples = sum(x['batch_size'] for x in outputs)
+        num_examples = sum(x['batch_size'] for x in outputs)
         for key in outputs[0].keys():
             if key == 'batch_size':
                 continue
             metrics[key] = sum(x[key] * x['batch_size']
-                               for x in outputs) / n_examples
+                               for x in outputs) / num_examples
         self.log_dict(metrics)
         return metrics
 
@@ -417,12 +419,12 @@ class BartSummarizer(LightningModule):
             outputs.append(output)
 
         metrics = {}
-        n_examples = sum(x['batch_size'] for x in outputs)
+        num_examples = sum(x['batch_size'] for x in outputs)
         for key in outputs[0].keys():
             if key == 'batch_size':
                 continue
             metrics[key] = sum(x[key] * x['batch_size']
-                               for x in outputs) / n_examples
+                               for x in outputs) / num_examples
         return metrics
 
 
@@ -432,60 +434,215 @@ class BertRanker(LightningModule):
         model_name_or_path: str,
         tokenizer: AutoTokenizer = None,
         config_name: str = None,
+        loss: str = 'listmle',
         learning_rate: float = 2e-5,
         adam_epsilon: float = 1e-8,
         weight_decay: float = 0.0,
         batch_size: int = 32,
+        predictions_file: str = 'predictions.jsonl'
     ):
+        assert loss in ['listmle', 'nce']
+
         super().__init__()
         self.save_hyperparameters()
 
         self.tokenizer = tokenizer
         config_name = config_name if config_name is not None else model_name_or_path
         config = AutoConfig.from_pretrained(config_name)
+        config.num_labels = 1
         self.bert = BertForSequenceClassification.from_pretrained(
             model_name_or_path,
             config=config,
-            num_labels=1,
         )
+        self.loss_fn = self.listmle_loss if loss == 'listmle' else self.nce_loss
 
     def forward(
         self,
-        input_ids,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
+        batch: dict,
+        infty: float = 1e9,
     ):
-        return self.bert(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-        )
+        N = len(batch['num_candidates'])
+        energies, i = [], 0
+        while True:
+            if f'cand{i}_ids' not in batch:
+                break
 
-    def listmle_loss(self, scores, num_candidates, infty=1e9):
-        N = len(num_candidates)
-        L = len(scores)
-        mask = torch.arange(L).unsqueeze(0).repeat(N, 1).to(num_candidates.device)
-        mask -= num_candidates.unsqueeze(1)
+            outputs = self.bert(
+                input_ids=batch[f'cand{i}_ids'],
+                attention_mask=batch[f'cand{i}_attention_mask'],
+                token_type_ids=batch[f'cand{i}_type_ids'],
+            )
+            energies.append(outputs.logits.reshape(N))
+            i += 1
+        energies = torch.stack(energies, dim=1)
+
+        N, L = energies.shape
+        mask = torch.arange(L).unsqueeze(0).repeat(N, 1).to(energies.device)
+        mask -= batch['num_candidates'].unsqueeze(1)
         mask = (mask < 0)
+        energies[~mask] = infty
+        return energies, mask
 
+    @staticmethod
+    def listmle_loss(scores, mask):
         loss = 0.
         for i, _ in enumerate(scores):
-            all_masks = mask[:, i:]
-            all_scores = torch.stack(scores[i:], dim=1)
-            all_scores -= all_scores.max(dim=1, keepdim=True).values
-            all_scores[~all_masks] = -infty
-            top_score = all_scores[:, 0]
-            loss_per_example = all_scores.logsumexp(dim=1) - top_score
+            scores_i = scores[:, i:].clone()
+            scores_i -= scores_i.max(dim=1, keepdim=True).values
+            top_score = scores_i[:, 0]
+            loss_per_example = scores_i.logsumexp(dim=1) - top_score
             loss_per_example[~mask[:, i]] = 0
             num_valid = mask[:, i].long().sum()
             loss += loss_per_example.sum() / num_valid
-        loss /= L
+        loss /= scores.shape[1]
+        return loss
+
+    @staticmethod
+    def nce_loss(scores, mask):
+        N = scores.shape[0]
+        with torch.no_grad():
+            # probs = scores.softmax(dim=1)
+            probs = scores.exp()  # no need to normalize for torch.multinomial
+            probs[~mask] = 0
+        indices = torch.multinomial(probs, num_samples=2)
+        indices = indices.sort(dim=1).values
+        scores_pos = scores[torch.arange(N), indices[:, 0]]
+        scores_neg = scores[torch.arange(N), indices[:, 1]]
+        logits = torch.cat([scores_pos, scores_neg], dim=0)
+        target = torch.cat([
+            torch.ones_like(scores_pos),
+            torch.zeros_like(scores_neg),
+        ], dim=0)
+        loss = F.binary_cross_entropy_with_logits(logits, target)
+        return loss
+
+    @staticmethod
+    def ndcg_metric(scores, mask):
+        N, L = scores.shape
+        true_relevances = 2**torch.arange(L-1, -1, step=-1).unsqueeze(0).repeat(N, 1) - 1
+        true_relevances[~mask] = 0
+        ndcg = metrics.ndcg_score(true_relevances.cpu().numpy(), scores.cpu().numpy(), ignore_ties=True)
+        return ndcg
+
+    def training_step(self, batch, batch_idx):
+        energies, mask = self(batch)
+        loss = self.loss_fn(-energies, mask)
+        self.log('train_loss', loss)
+
+        with torch.no_grad():
+            preds = energies.argmin(dim=1)
+        acc = (preds == 0).float().mean()
+        self.log('train_top1_acc', acc)
 
         return loss
 
+    def validation_step(self, batch, batch_idx):
+        energies, mask = self(batch)
+        outputs = {}
+        outputs['val_loss'] = self.loss_fn(-energies, mask)
+
+        preds = energies.argmin(dim=1)
+        outputs['val_top1_acc'] = (preds == 0).float().mean()
+        outputs['val_top3_acc'] = (preds < 3).float().mean()
+
+        outputs['val_ndcg'] = self.ndcg_metric(-energies, mask)
+
+        for key in outputs:
+            self.log(key, outputs[key])
+
+        outputs['batch_size'] = len(energies)
+
+        return outputs
+
+    def validation_epoch_end(self, outputs):
+        metrics = {}
+        num_examples = sum(x['batch_size'] for x in outputs)
+        for key in outputs[0].keys():
+            if key == 'batch_size':
+                continue
+            metrics[key] = sum(x[key] * x['batch_size']
+                               for x in outputs) / num_examples
+        self.log_dict(metrics)
+        return metrics
+
+    def test_step(self, batch, batch_idx):
+        energies, mask = self(batch)
+        outputs = {}
+        outputs['test_loss'] = self.loss_fn(-energies, mask)
+
+        preds = energies.argmin(dim=1)
+        outputs['test_top1_acc'] = (preds == 0).float().mean()
+        outputs['test_top3_acc'] = (preds < 3).float().mean()
+
+        outputs['test_ndcg'] = self.ndcg_metric(-energies, mask)
+
+        outputs['batch_size'] = len(energies)
+
+        return outputs
+
+    def test_epoch_end(self, outputs):
+        metrics = {}
+        num_examples = sum(x['batch_size'] for x in outputs)
+        for key in outputs[0].keys():
+            if key == 'batch_size':
+                continue
+            metrics[key] = sum(x[key] * x['batch_size']
+                               for x in outputs) / num_examples
+        self.log_dict(metrics)
+        return metrics
+
+    def on_predict_start(self):
+        self._predict_f = open(self.hparams.predictions_file, 'w', encoding='utf-8')
+
+    def predict_step(self, batch, batch_idx):
+        energies, _ = self(batch)
+        preds = energies.argmin(dim=1)
+        for i, pred in enumerate(preds):
+            token_ids = batch[f'cand{pred}_ids'][i]
+            type_ids = batch[f'cand{pred}_type_ids'][i]
+            source_ids = token_ids[type_ids == 0]
+            summary_ids = token_ids[type_ids == 1]
+            source_txt = self.tokenizer.decode(source_ids, skip_special_tokens=True)
+            summary_txt = self.tokenizer.decode(summary_ids, skip_special_tokens=True)
+            example = {'text': source_txt, 'summary': summary_txt, 'summary index': pred.item()}
+            self._predict_f.write(json.dumps(example, ensure_ascii=False) + '\n')
+
+    def on_predict_end(self):
+        self._predict_f.close()
+
+    def setup(self, stage=None) -> None:
+        if stage != 'fit':
+            return
+        train_loader = self.train_dataloader()
+
+        tb_size = self.hparams.batch_size * max(1, self.trainer.gpus)
+        steps_per_epoch = (len(train_loader.dataset) //
+                           tb_size) // self.trainer.accumulate_grad_batches
+        self.total_steps = self.trainer.max_epochs * steps_per_epoch
+
+    def configure_optimizers(self):
+        no_decay = ['bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+            {
+                'params': [p for n, p in self.named_parameters() if not any(nd in n for nd in no_decay)],
+                'weight_decay': self.hparams.weight_decay,
+            },
+            {
+                'params': [p for n, p in self.named_parameters() if any(nd in n for nd in no_decay)],
+                'weight_decay': 0.0,
+            },
+        ]
+
+        optimizer = torch.optim.AdamW(
+            optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon
+        )
+
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            # num_warmup_steps=int(0.10 * self.total_steps),
+            num_warmup_steps=0,
+            num_training_steps=self.total_steps,
+        )
+        scheduler = {'scheduler': scheduler,
+                     'interval': 'step', 'frequency': 1}
+        return [optimizer], [scheduler]

@@ -9,6 +9,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 import json
+import hashlib
 transformers.logging.set_verbosity_error()
 class CnnDmDataMod(LightningDataModule):
 
@@ -87,18 +88,54 @@ class CnnDmDataMod(LightningDataModule):
 
         return features
 
+class RankDataMod(LightningDataModule):
+    def __init__(
+        self,
+        path: str,
+        metric: str,
+        tokenizer: AutoTokenizer,
+        batch_size: int = 32,
+        cache: bool = True,
+    ):
+        super().__init__()
 
-class CnnDmRankDataset(Dataset):
-    def __init__(self, path, split, metric, tokenizer, cache=True):
+        self.dataset = {
+            'train': RankDataset(path, 'train', metric, tokenizer, cache),
+            'validation': RankDataset(path, 'validation', metric, tokenizer, cache),
+            'test': RankDataset(path, 'test', metric, tokenizer, cache),
+        }
+        self.batch_size = batch_size
+        self.tokenizer = tokenizer
+
+    def train_dataloader(self):
+        return DataLoader(self.dataset['train'], batch_size=self.batch_size, collate_fn=DataCollator(self.tokenizer.pad_token_id), num_workers=4, shuffle=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.dataset['validation'], batch_size=self.batch_size, collate_fn=DataCollator(self.tokenizer.pad_token_id), num_workers=4, shuffle=False)
+
+    def test_dataloader(self):
+        return DataLoader(self.dataset['test'], batch_size=self.batch_size, collate_fn=DataCollator(self.tokenizer.pad_token_id), num_workers=4, shuffle=False)
+
+class RankDataset(Dataset):
+    def __init__(
+        self,
+        path,
+        split,
+        metric,
+        tokenizer,
+        cache=True
+    ):
         super().__init__()
         assert split in ['train', 'validation', 'test']
         assert metric in ['ctc_relevance', 'ctc_consistency', 'ctc_sum', 'questeval', 'rougeL']
 
         if cache:
             try:
-                print('Looking for cached preprocessed dataset...')
-                self.tok_data = load_from_disk(os.path.join(path, 'cache', f'cache-{metric}-{split}.hf'))
+                print(f'Looking for cached preprocessed {split} dataset...')
+                hash_str = self.get_hash(split, metric, tokenizer)
+                self.tok_data = load_from_disk(os.path.join(path, 'cache', f'cache-{hash_str}.hf'))
                 self.tok_data.set_format(type='torch')
+                print('Loaded cached preprocessed dataset!')
             except:
                 print("Couldn't find cached preprocessed dataset. Loading from raw data...")
                 self.load_and_preprocess_data(path, split, metric, tokenizer)
@@ -106,10 +143,12 @@ class CnnDmRankDataset(Dataset):
             self.load_and_preprocess_data(path, split, metric, tokenizer)
 
         if cache:
+            hash_str = self.get_hash(split, metric, tokenizer)
             if not os.path.exists(os.path.join(path, 'cache')):
                 os.makedirs(os.path.join(path, 'cache'))
-            if not os.path.exists(os.path.join(path, 'cache', f'cache-{metric}-{split}.hf')):
-                self.tok_data.save_to_disk(os.path.join(path, 'cache', f'cache-{metric}-{split}.hf'))
+            if not os.path.exists(os.path.join(path, 'cache', f'cache-{hash_str}.hf')):
+                self.tok_data.save_to_disk(os.path.join(path, 'cache', f'cache-{hash_str}.hf'))
+                print('Preprocessed dataset saved at {}'.format(os.path.join(path, 'cache', f'cache-{hash_str}.hf')))
 
     def load_and_preprocess_data(self, path, split, metric, tokenizer):
         data_file = os.path.join(path, f'diverse-samples-{split}.jsonl')
@@ -150,7 +189,9 @@ class CnnDmRankDataset(Dataset):
             if not np.any(example_rank[metric_col]) or len(example_rank[rank_col]) == 1:
                 continue
 
+            # the first element of the list is the source document
             ranked_example = [example['text']]
+            # the following are the summaries, from the top-ranked to the bottom-ranked
             for rank in example_rank[rank_col]:
                 ranked_example.append(example[f'gen_summary{rank}'])
             text_data.append(ranked_example)
@@ -185,6 +226,11 @@ class CnnDmRankDataset(Dataset):
 
     def __getitem__(self, index):
         return self.tok_data[index]
+
+    @staticmethod
+    def get_hash(split, metric, tokenizer):
+        str2hash = f'{split}-{metric}-{tokenizer.name_or_path}'
+        return hashlib.sha256(str2hash.encode('utf-8')).hexdigest()
 
 class DataCollator:
     def __init__(self, pad_token_id):
@@ -228,6 +274,11 @@ class DataCollator:
 if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained(
         'bert-base-uncased', use_fast=False)
-    data = CnnDmRankDataset('/mnt/hdd2/dpc/CNN_DailyMail_HuggingFace/3.0.0/rerank_data', 'validation', 'ctc_relevance', tokenizer)
-    loader = DataLoader(data, batch_size=4, collate_fn=DataCollator(tokenizer.pad_token_id))
-    next(iter(loader))
+    data = RankDataset('/mnt/hdd2/dpc/CNN_DailyMail_HuggingFace/3.0.0/rerank_data', 'train', 'questeval', tokenizer)
+    # loader = DataLoader(data, batch_size=4, collate_fn=DataCollator(tokenizer.pad_token_id))
+    for i, x in enumerate(data):
+        j = 0
+        while True:
+            if f'cand{j}_ids' not in x:
+                break
+            j += 1
