@@ -12,6 +12,7 @@ import numpy as np
 import sys
 import json
 from tqdm import tqdm
+from utils import postprocess_text, replace_special_chars
 
 class BartSummarizer(LightningModule):
     def __init__(
@@ -27,11 +28,12 @@ class BartSummarizer(LightningModule):
         num_beam_groups: int = 1,
         diversity_penalty: float = 0.0,
         num_return_sequences: int = 1,
-        predictions_file: str = 'predict.jsonl',
+        predictions_file: str = 'predictions.jsonl',
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['predictions_file'])
 
+        self.predictions_file = predictions_file
         self.tokenizer = tokenizer
         config_name = config_name if config_name is not None else model_name_or_path
         config = AutoConfig.from_pretrained(
@@ -126,7 +128,7 @@ class BartSummarizer(LightningModule):
         return metrics
 
     def on_predict_start(self):
-        self._predict_f = open(self.hparams.predictions_file, 'w', encoding='utf-8')
+        self._predict_f = open(self.predictions_file, 'w', encoding='utf-8')
 
     def predict_step(self, batch, batch_idx):
         preds = self.bart.generate(
@@ -242,8 +244,9 @@ class BartSummarizer(LightningModule):
             result['gen_len'] = np.mean(prediction_lens)
 
         # Some simple post-processing
-        decoded_inputs, decoded_preds, decoded_labels = self.postprocess_text(
-            decoded_inputs, decoded_preds, decoded_labels)
+        decoded_inputs = postprocess_text(decoded_inputs)
+        decoded_preds = postprocess_text(decoded_preds)
+        decoded_labels = postprocess_text(decoded_labels)
 
         if metrics is None or 'rouge' in metrics:
             # Extract a few results from ROUGE
@@ -254,20 +257,12 @@ class BartSummarizer(LightningModule):
             result.update({key: sum(x.fmeasure * 100 for x in lst)/len(lst)
                            for key, lst in rouge_scores.items()})
 
-            rouge_source = self.rouge.compute(predictions=decoded_preds,
-                                              references=decoded_labels,
-                                              use_stemmer=True, use_agregator=False)
-            result.update(
-                {key+'_prec_src': sum(x.precision * 100  for x in lst)/len(lst)
-                 for key, lst in rouge_source.items()}
-            )
-
         if metrics is None or 'ctc' in metrics:
             consistency_scores, relevance_scores = [], []
             for inpt, pred, label in zip(decoded_inputs, decoded_preds, decoded_labels):
-                inpt = self.replace_special_chars(inpt)
-                pred = self.replace_special_chars(pred)
-                label = self.replace_special_chars(label)
+                inpt = replace_special_chars(inpt)
+                pred = replace_special_chars(pred)
+                label = replace_special_chars(label)
 
                 try:
                     consistency = self.ctc_scorer.score(doc=inpt, refs=[], hypo=pred, aspect='consistency')
@@ -300,71 +295,6 @@ class BartSummarizer(LightningModule):
             result['factsumm_qags'] = np.mean(qags)
 
         return result
-
-    @staticmethod
-    def replace_special_chars(text):
-        text = text.replace('â‚¬', '€')
-        text = text.replace('â', 'a')
-        text = text.replace('Â', 'A')
-        text = text.replace('å', 'a')
-        text = text.replace('Å', 'A')
-        text = text.replace('ă', 'a')
-        text = text.replace('Ă', 'A')
-        text = text.replace('ä', 'a')
-        text = text.replace('Ä', 'A')
-        text = text.replace('č', 'c')
-        text = text.replace('Č', 'C')
-        text = text.replace('ď', 'd')
-        text = text.replace('Ď', 'D')
-        text = text.replace('ě', 'e')
-        text = text.replace('Ě', 'E')
-        text = text.replace('ę', 'e')
-        text = text.replace('Ę', 'E')
-        text = text.replace('ê', 'e')
-        text = text.replace('Ê', 'E')
-        text = text.replace('ễ', 'e')
-        text = text.replace('Ễ', 'E')
-        text = text.replace('ǧ', 'g')
-        text = text.replace('Ǧ', 'G')
-        text = text.replace('ị', 'i')
-        text = text.replace('Ị', 'I')
-        text = text.replace('ľ', 'l')
-        text = text.replace('Ľ', 'L')
-        text = text.replace('ň', 'n')
-        text = text.replace('Ň', 'N')
-        text = text.replace('ö', 'ö')
-        text = text.replace('Ö', 'O')
-        text = text.replace('ř', 'r')
-        text = text.replace('Ř', 'R')
-        text = text.replace('š', 's')
-        text = text.replace('Š', 'S')
-        text = text.replace('ś', 's')
-        text = text.replace('Ś', 'S')
-        text = text.replace('ť', 't')
-        text = text.replace('Ť', 'T')
-        text = text.replace('ü', 'u')
-        text = text.replace('Ü', 'U')
-        text = text.replace('ủ', 'u')
-        text = text.replace('Ủ', 'U')
-        text = text.replace('ů', 'u')
-        text = text.replace('Ů', 'U')
-        text = text.replace('ý', 'y')
-        text = text.replace('Ý', 'Y')
-        text = text.replace('ŷ', 'y')
-        text = text.replace('Ŷ', 'Y')
-        text = text.replace('ž', 'z')
-        text = text.replace('Ž', 'Z')
-        text = text.replace('¥', 'Y')
-        text = text.replace('½', '1/2')
-        text = text.replace('¼', '1/4')
-        text = text.replace('¾', '3/4')
-        text = text.replace('¹', '1')
-        text = text.replace('²', '2')
-        text = text.replace('³', '3')
-        text = text.replace('⁴', '4')
-        text = text.replace('⁄', '/')
-        text = text.replace('˚', 'deg')
-        return text
 
     def show_examples(self, input_ids, labels, preds=None, ofile=None):
 
@@ -439,12 +369,14 @@ class BertRanker(LightningModule):
         adam_epsilon: float = 1e-8,
         weight_decay: float = 0.0,
         batch_size: int = 32,
+        metric: str = 'ctc_sum',
+        num_train_samples: int =-1,
         predictions_file: str = 'predictions.jsonl'
     ):
         assert loss in ['listmle', 'nce']
 
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['predictions_file'])
 
         self.tokenizer = tokenizer
         config_name = config_name if config_name is not None else model_name_or_path
@@ -455,6 +387,7 @@ class BertRanker(LightningModule):
             config=config,
         )
         self.loss_fn = self.listmle_loss if loss == 'listmle' else self.nce_loss
+        self.predictions_file = predictions_file
 
     def forward(
         self,
@@ -486,7 +419,8 @@ class BertRanker(LightningModule):
     @staticmethod
     def listmle_loss(scores, mask):
         loss = 0.
-        for i, _ in enumerate(scores):
+        max_num_candidates = mask.sum(dim=1).max().item()
+        for i in range(max_num_candidates):
             scores_i = scores[:, i:].clone()
             scores_i -= scores_i.max(dim=1, keepdim=True).values
             top_score = scores_i[:, 0]
@@ -501,7 +435,6 @@ class BertRanker(LightningModule):
     def nce_loss(scores, mask):
         N = scores.shape[0]
         with torch.no_grad():
-            # probs = scores.softmax(dim=1)
             probs = scores.exp()  # no need to normalize for torch.multinomial
             probs[~mask] = 0
         indices = torch.multinomial(probs, num_samples=2)
@@ -531,8 +464,10 @@ class BertRanker(LightningModule):
 
         with torch.no_grad():
             preds = energies.argmin(dim=1)
-        acc = (preds == 0).float().mean()
-        self.log('train_top1_acc', acc)
+        top1acc = (preds == 0).float().mean()
+        top3acc = (preds < 3).float().mean()
+        self.log('train_top1_acc', top1acc)
+        self.log('train_top3_acc', top3acc)
 
         return loss
 
@@ -592,7 +527,7 @@ class BertRanker(LightningModule):
         return metrics
 
     def on_predict_start(self):
-        self._predict_f = open(self.hparams.predictions_file, 'w', encoding='utf-8')
+        self._predict_f = open(self.predictions_file, 'w', encoding='utf-8')
 
     def predict_step(self, batch, batch_idx):
         energies, _ = self(batch)
@@ -604,7 +539,14 @@ class BertRanker(LightningModule):
             summary_ids = token_ids[type_ids == 1]
             source_txt = self.tokenizer.decode(source_ids, skip_special_tokens=True)
             summary_txt = self.tokenizer.decode(summary_ids, skip_special_tokens=True)
-            example = {'text': source_txt, 'summary': summary_txt, 'summary index': pred.item()}
+            candidate_rank = pred.item()
+            summary_idx = batch['candidate_indices'][i, candidate_rank].item()
+            example = {
+                'text': source_txt,
+                'summary': summary_txt,
+                'summary_index': summary_idx,
+                'candidate_rank': candidate_rank
+            }
             self._predict_f.write(json.dumps(example, ensure_ascii=False) + '\n')
 
     def on_predict_end(self):
@@ -639,7 +581,6 @@ class BertRanker(LightningModule):
 
         scheduler = get_linear_schedule_with_warmup(
             optimizer,
-            # num_warmup_steps=int(0.10 * self.total_steps),
             num_warmup_steps=0,
             num_training_steps=self.total_steps,
         )
