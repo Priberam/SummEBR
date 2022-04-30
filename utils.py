@@ -9,6 +9,7 @@ def postprocess_text(inputs):
 
 def replace_special_chars(text):
     text = text.replace('â‚¬', '€')
+    text = text.replace('ã©', 'a')
     text = text.replace('â', 'a')
     text = text.replace('Â', 'A')
     text = text.replace('å', 'a')
@@ -46,6 +47,8 @@ def replace_special_chars(text):
     text = text.replace('Ö', 'O')
     text = text.replace('ó', 'o')
     text = text.replace('Ó', 'O')
+    text = text.replace('ô', 'o')
+    text = text.replace('Ô', 'O')
     text = text.replace('œ', 'oe')
     text = text.replace('Œ', 'OE')
     text = text.replace('ř', 'r')
@@ -64,6 +67,8 @@ def replace_special_chars(text):
     text = text.replace('Ủ', 'U')
     text = text.replace('ů', 'u')
     text = text.replace('Ů', 'U')
+    text = text.replace('ŵ', 'w')
+    text = text.replace('Ŵ', 'w')
     text = text.replace('ý', 'y')
     text = text.replace('Ý', 'Y')
     text = text.replace('ŷ', 'y')
@@ -80,4 +85,7 @@ def replace_special_chars(text):
     text = text.replace('⁴', '4')
     text = text.replace('⁄', '/')
     text = text.replace('˚', 'deg')
+    text = text.replace('呢', '')
+    text = text.replace('製', '')
+    text = text.replace('ยพ', '3/4')
     return text

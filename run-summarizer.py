@@ -2,18 +2,20 @@ import argparse
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from transformers import AutoTokenizer
-from dataset import CnnDmDataMod
-from model import BartSummarizer
+from dataset import SummDataMod
+from model import Summarizer
 
 
 def main():
     parser = argparse.ArgumentParser(
         description='Text summarization with BART.', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser = Trainer.add_argparse_args(parser)
-    parser.add_argument('-d', '--data_path', default='/mnt/SSD1/dpc/CNN_DailyMail_HuggingFace/3.0.0',
+    parser.add_argument('-d', '--data_path', default='./data/cnndm',
                         type=str, metavar='', help='data directory path')
     parser.add_argument('-o', '--output', default='./checkpoints',
                         type=str, metavar='', help='checkpoint save dir')
+    parser.add_argument('--dataset', default='cnndm',
+                        type=str, metavar='', help='name of the dataset (cnndm / xsum)')
     parser.add_argument('--model_name_or_path', default='facebook/bart-large',
                         type=str, metavar='', help='path to pretrained model or model identifier from huggingface.co/models')
     parser.add_argument('--tokenizer_name', default=None,
@@ -52,12 +54,13 @@ def main():
     tokenizer_name = args.tokenizer_name if args.tokenizer_name is not None else args.model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=False)
 
-    model = BartSummarizer(
+    model = Summarizer(
         args.model_name_or_path,
         tokenizer=tokenizer,
         config_name=args.config_name,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
+        accumulate_grad_batches=args.accumulate_grad_batches,
         num_beams=args.num_beams,
         num_beam_groups=args.num_beam_groups,
         diversity_penalty=args.diversity_penalty,
@@ -65,10 +68,11 @@ def main():
         predictions_file=args.predictions_file,
     )
 
-    datamodule = CnnDmDataMod(
+    datamodule = SummDataMod(
         args.data_path,
-        model.bart,
+        model.model,
         tokenizer,
+        dataset=args.dataset,
         max_seq_length=1024,
         batch_size=args.batch_size,
     )
@@ -91,13 +95,13 @@ def main():
 
     if args.do_eval:
         if checkpoint is not None:
-            model = BartSummarizer.load_from_checkpoint(checkpoint)
+            model = Summarizer.load_from_checkpoint(checkpoint)
         trainer = Trainer.from_argparse_args(args)
         trainer.test(model, datamodule=datamodule)
 
     if args.do_predict:
         if checkpoint is not None:
-            model = BartSummarizer.load_from_checkpoint(checkpoint)
+            model = Summarizer.load_from_checkpoint(checkpoint)
         trainer = Trainer.from_argparse_args(args)
         trainer.predict(model, datamodule=datamodule)
 

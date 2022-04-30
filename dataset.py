@@ -13,19 +13,15 @@ import json
 import hashlib
 transformers.logging.set_verbosity_warning()
 
-from datasets.fingerprint import Hasher
 
-class CnnDmDataMod(LightningDataModule):
 
-    loader_columns = [
-        'article', 'highlights'
-    ]
-
+class SummDataMod(LightningDataModule):
     def __init__(
         self,
         path: str,
         model: AutoModelForSeq2SeqLM,
         tokenizer: AutoTokenizer,
+        dataset: str = 'cnndm',
         max_seq_length: int = 1024,
         batch_size: int = 32,
         **kwargs
@@ -39,6 +35,10 @@ class CnnDmDataMod(LightningDataModule):
             tokenizer=tokenizer,
             model=model
         )
+        if dataset == 'cnndm':
+            self.loader_columns = ['article', 'highlights']
+        else:
+            self.loader_columns = ['document', 'summary']
 
     def prepare_data(self):
         self.dataset = load_from_disk(self.path)
@@ -60,7 +60,7 @@ class CnnDmDataMod(LightningDataModule):
             x for x in self.dataset.keys() if 'validation' in x]
 
     def train_dataloader(self):
-        return DataLoader(self.dataset['train'], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=True)
+        return DataLoader(self.dataset['train'], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=False)
 
     def val_dataloader(self):
         if len(self.eval_splits) == 1:
@@ -75,16 +75,19 @@ class CnnDmDataMod(LightningDataModule):
             return [DataLoader(self.dataset[x], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=False) for x in self.eval_splits]
 
     def predict_dataloader(self):
-        return self.val_dataloader()
+        return self.test_dataloader()
 
     def convert_to_features(self, example_batch, indices=None):
+        document_col, summary_col = self.loader_columns
         inputs = self.tokenizer(
-            example_batch['article'], max_length=self.max_seq_length, padding=False, truncation=True
+            # example_batch[document_col], max_length=self.max_seq_length, padding=False, truncation=True
+            example_batch[document_col], padding=False, truncation=True
         )
 
         with self.tokenizer.as_target_tokenizer():
             labels = self.tokenizer(
-                example_batch['highlights'], max_length=self.max_seq_length, padding=False, truncation=True
+                # example_batch[summary_col], max_length=self.max_seq_length, padding=False, truncation=True
+                example_batch[summary_col], padding=False, truncation=True
             )
         features = {}
         features['input_ids'] = [torch.tensor(x) for x in inputs['input_ids']]
@@ -103,6 +106,7 @@ class RankDataMod(LightningDataModule):
         batch_size: int = 32,
         num_train_samples: int = -1,
         cache: bool = True,
+        predict_only: bool = False,
     ):
         super().__init__()
         self.path = path
@@ -111,15 +115,21 @@ class RankDataMod(LightningDataModule):
         self.batch_size = batch_size
         self.num_train_samples = num_train_samples
         self.cache = cache
+        self.predict_only = predict_only
 
     def prepare_data(self):
-        self.dataset = {
-            'train': RankDataset(self.path, 'train', self.metric, self.tokenizer, self.cache),
-            'validation': RankDataset(self.path, 'validation', self.metric, self.tokenizer, self.cache),
-            'test': RankDataset(self.path, 'test', self.metric, self.tokenizer, self.cache),
-        }
-        if self.num_train_samples > -1 and self.num_train_samples < len(self.dataset['train']):
-            self.dataset['train'] = Subset(self.dataset['train'], range(self.num_train_samples))
+        if self.predict_only:
+            self.dataset = {
+                'test': RankDataset(self.path, 'test', self.metric, self.tokenizer, self.cache),
+            }
+        else:
+            self.dataset = {
+                'train': RankDataset(self.path, 'train', self.metric, self.tokenizer, self.cache),
+                'validation': RankDataset(self.path, 'validation', self.metric, self.tokenizer, self.cache),
+                'test': RankDataset(self.path, 'test', self.metric, self.tokenizer, self.cache),
+            }
+            if self.num_train_samples > -1 and self.num_train_samples < len(self.dataset['train']):
+                self.dataset['train'] = Subset(self.dataset['train'], range(self.num_train_samples))
 
     def train_dataloader(self):
         return DataLoader(self.dataset['train'], batch_size=self.batch_size, collate_fn=DataCollator(self.tokenizer.pad_token_id), num_workers=4, shuffle=True)
@@ -151,9 +161,10 @@ class RankDataset(Dataset):
             try:
                 print(f'Looking for cached preprocessed {split} dataset...')
                 hash_str = self.get_hash(split, metric, tokenizer)
-                self.tok_data = load_from_disk(os.path.join(path, 'cache', f'cache-{hash_str}'))
+                cache_path = os.path.join(path, 'cache', f'cache-{hash_str}')
+                self.tok_data = load_from_disk(cache_path)
                 self.tok_data.set_format(type='torch')
-                print('Loaded cached preprocessed dataset!')
+                print(f'Loaded cached preprocessed dataset at {cache_path}')
             except:
                 print("Couldn't find cached preprocessed dataset. Loading from raw data...")
                 self.load_and_preprocess_data(path, split, metric, tokenizer)
@@ -168,7 +179,7 @@ class RankDataset(Dataset):
                 self.tok_data.save_to_disk(os.path.join(path, 'cache', f'cache-{hash_str}'))
                 print('Preprocessed dataset saved at {}'.format(os.path.join(path, 'cache', f'cache-{hash_str}')))
 
-    def load_and_preprocess_data(self, path, split, metric, tokenizer):
+    def load_and_preprocess_data(self, path, split, metric, tokenizer, offset=0):
         data_file = os.path.join(path, f'diverse-samples-{split}.jsonl')
         if 'ctc' in metric:
             rank_file = os.path.join(path, f'results-ctc-{split}.jsonl')
@@ -178,15 +189,15 @@ class RankDataset(Dataset):
         with open(data_file, 'r', encoding='utf-8') as fd:
             lines = fd.readlines()
         examples = [json.loads(line) for line in tqdm(lines)]
-        examples = dict((k.lower(), v) for k, v in examples.items())
+        examples = [dict((k.lower(), v) for k, v in e.items()) for e in examples]
 
         with open(rank_file, 'r', encoding='utf-8') as fd:
             lines = fd.readlines()
         examples_rank = [json.loads(line) for line in tqdm(lines)]
-        examples_rank = dict((k.lower(), v) for k, v in examples_rank.items())
+        examples_rank = [dict((k.lower(), v) for k, v in e.items()) for e in examples_rank]
 
         num_examples = min(len(examples), len(examples_rank)-1)
-        examples = examples[:num_examples]
+        examples = examples[offset:offset+num_examples]
         examples_rank = examples_rank[:num_examples]
 
         if metric == 'ctc_relevance':
@@ -197,12 +208,14 @@ class RankDataset(Dataset):
             metric_col = 'consistency'
         elif metric == 'ctc_sum':
             rank_col = 'rank_sum'
-            metric_col = 'relevance'
+            metric_col = 'sum'
+            for example_rank in tqdm(examples_rank, total=num_examples):
+                example_rank[metric_col] = [example_rank['consistency'][i] + example_rank['relevance'][i] for i in range(len(example_rank['consistency']))]
         else:
             rank_col = 'rank'
             metric_col = metric
 
-        text_data, ranks = [], []
+        text_data, ranks, scores = [], [], []
         max_num_candidates = 0
         for i, (example, example_rank) in tqdm(enumerate(zip(examples, examples_rank)), total=num_examples):
             # if the current example has no valid score, skip it
@@ -210,25 +223,29 @@ class RankDataset(Dataset):
                 if split != 'test':
                     continue
                 else:
-                    raise Exception(f'Invalid example in the test set (index={i})')
+                    print(f'Invalid example in the test set (index={i})')
 
             # the first element of the list is the source document
             ranked_example = [example['text']]
+            ranked_scores = []
             # the following are the summaries, from the top-ranked to the bottom-ranked
             for rank in example_rank[rank_col]:
                 ranked_example.append(example[f'gen_summary{rank}'])
+                ranked_scores.append(example_rank[metric_col][rank])
             text_data.append(ranked_example)
             ranks.append(example_rank[rank_col])
+            scores.append(ranked_scores)
 
             if len(example_rank[rank_col]) > max_num_candidates:
                 max_num_candidates = len(example_rank[rank_col])
 
-        tok_data = {'num_candidates': [], 'candidate_indices': []}
+        tok_data = {'num_candidates': [], 'candidate_indices': [], 'scores': []}
         tok_data.update({f'cand{i}_ids': [] for i in range(max_num_candidates)})
         tok_data.update({f'cand{i}_type_ids': [] for i in range(max_num_candidates)})
-        for i, (example, candidate_indices) in tqdm(enumerate(zip(text_data, ranks)), total=len(text_data)):
+        for i, (example, candidate_indices, candidate_scores) in tqdm(enumerate(zip(text_data, ranks, scores)), total=len(text_data)):
             tok_data['num_candidates'].append(len(example)-1)
             tok_data['candidate_indices'].append(candidate_indices)
+            tok_data['scores'].append(candidate_scores)
             for j in range(1, len(example)):
                 example_tok = tokenizer(text=example[0], text_pair=example[j], truncation=True, return_overflowing_tokens=False)
                 tok_data[f'cand{j-1}_ids'].append(example_tok['input_ids'])
@@ -240,7 +257,7 @@ class RankDataset(Dataset):
         self.tok_data = HF_Dataset.from_dict(tok_data)
         self.tok_data.set_format(
             type='torch',
-            columns=(['num_candidates', 'candidate_indices']
+            columns=(['num_candidates', 'candidate_indices', 'scores']
                      + [f'cand{i}_ids' for i in range(max_num_candidates)]
                      + [f'cand{i}_type_ids' for i in range(max_num_candidates)]
                     ),
@@ -275,8 +292,12 @@ class DataCollator:
             remainder = [-1] * \
                     (max_num_candidates - len(example['candidate_indices']))
             example['candidate_indices'] = torch.cat([example['candidate_indices'], torch.tensor(remainder)]).long()
+            example['scores'] = torch.cat([example['scores'], torch.tensor(remainder)]).float()
+
         batched_examples['candidate_indices'] = torch.stack(
             [example['candidate_indices'] for example in examples])
+        batched_examples['scores'] = torch.stack(
+            [example['scores'] for example in examples])
 
         for key in keys:
             key_prefix = key.split('_')[0]
@@ -302,3 +323,24 @@ class DataCollator:
                 [example[key_prefix + '_type_ids'] for example in examples])
 
         return batched_examples
+
+
+if __name__ == '__main__':
+    # transformers.logging.set_verbosity_error()
+    # tokenizer = AutoTokenizer.from_pretrained(
+    #     'bert-base-uncased', use_fast=False)
+    # data = RankDataset('./data/cnndm/rerank_data', 'train', 'rougel', tokenizer)
+    # for i, x in enumerate(data):
+    #     print('scores', x['scores'])
+    #     input()
+    dataset =  SummDataMod(
+        './data/xsum/',
+        None,
+        None,
+        dataset='xsum',
+        max_seq_length=1024,
+        batch_size=1,
+    )
+
+    for i, x in enumerate(dataset):
+        pass

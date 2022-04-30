@@ -9,18 +9,28 @@ from tqdm import tqdm
 from utils import postprocess_text, replace_special_chars
 
 
-ctc_scorer = SummarizationScorer(align='D-cnndm')
+ctc_scorer = SummarizationScorer(align='D-xsum')
+ctc_scorer_rel = SummarizationScorer(align='D-cnndm')
 questeval_scorer = QuestEval(task='summarization', do_weighter=True)
 rouge_scorer = load_metric('rouge')
 
-def compute_rougel_score(reference, predictions):
+def compute_rouge_score(reference, predictions):
     references = postprocess_text([reference])*len(predictions)
     predictions = postprocess_text(predictions)
     rougel_scores = rouge_scorer.compute(predictions=predictions,
                                          references=references,
                                          use_stemmer=True, use_agregator=False)['rougeLsum']
     rougel_scores = np.array([x.fmeasure for x in rougel_scores])
-    return rougel_scores
+
+    rouge_scores = rouge_scorer.compute(predictions=predictions,
+                                         references=references,
+                                         use_stemmer=True, use_agregator=False)
+
+    rouge1_scores = np.array([x.fmeasure for x in rouge_scores['rouge1']])
+    rouge2_scores = np.array([x.fmeasure for x in rouge_scores['rouge2']])
+    rougel_scores = np.array([x.fmeasure for x in rouge_scores['rougeLsum']])
+
+    return rouge1_scores, rouge2_scores, rougel_scores
 
 def compute_ctc_score(inpt, reference, predictions):
     inpt = replace_special_chars(inpt)
@@ -31,7 +41,8 @@ def compute_ctc_score(inpt, reference, predictions):
     for pred in predictions:
         try:
             consistency = ctc_scorer.score(doc=inpt, refs=[], hypo=pred, aspect='consistency')
-            relevance = ctc_scorer.score(doc=inpt, refs=[reference], hypo=pred, aspect='relevance')
+            relevance = ctc_scorer_rel.score(doc=inpt, refs=[reference], hypo=pred, aspect='relevance')
+            # relevance = None
             consistency_scores.append(consistency if consistency is not None else 0)
             relevance_scores.append(relevance if relevance is not None else 0)
         except:
@@ -59,12 +70,12 @@ def compute_questeval_score(inpt, predictions):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', type=str, default='predictions.jsonl')
-    parser.add_argument('--results_rougel', type=str, default='results-rougel.jsonl')
+    parser.add_argument('--results_rouge', type=str, default='results-rouge.jsonl')
     parser.add_argument('--results_ctc', type=str, default='results-ctc.jsonl')
     parser.add_argument('--results_questeval', type=str, default='results-questeval.jsonl')
     parser.add_argument('--offset', type=int, default=0)
     parser.add_argument('--num_samples', type=int, default=None)
-    parser.add_argument('--skip_rougel', dest='skip_rougel', action='store_true')
+    parser.add_argument('--skip_rouge', dest='skip_rouge', action='store_true')
     parser.add_argument('--skip_ctc', dest='skip_ctc', action='store_true')
     parser.add_argument('--skip_questeval', dest='skip_questeval', action='store_true')
     args = parser.parse_args()
@@ -75,9 +86,11 @@ def main():
     num_examples = (min(args.num_samples, len(examples)) if args.num_samples is not None and args.num_samples > 0
                     else len(examples))
 
-    if not args.skip_rougel:
-        print('Computing Rouge-L scores...')
-        with open(args.results_rougel, 'w', encoding='utf-8') as f:
+    if not args.skip_rouge:
+        print('Computing ROUGE scores...')
+        with open(args.results_rouge, 'w', encoding='utf-8') as f:
+            rouge1_med_avg, rouge1_amp_avg = 0, 0
+            rouge2_med_avg, rouge2_amp_avg = 0, 0
             rougel_med_avg, rougel_amp_avg, rougel_best_avg = 0., 0., 0.
             for i, example in tqdm(enumerate(examples), total=num_examples+args.offset):
                 if i < args.offset:
@@ -86,27 +99,46 @@ def main():
                     break
 
                 predictions = [example[x] for x in example if 'gen_summary' in x]
-                rougel_scores = compute_rougel_score(example['gold_summary'], predictions)
+                rouge1_scores, rouge2_scores, rougel_scores = compute_rouge_score(example['gold_summary'], predictions)
                 rougel_rank = np.argsort(-rougel_scores)
                 scores = {
+                    'rouge1': rouge1_scores.tolist(),
+                    'rouge2': rouge2_scores.tolist(),
                     'rougel': rougel_scores.tolist(),
                     'rank': rougel_rank.tolist(),
                 }
                 f.write(json.dumps(scores, ensure_ascii=False) + "\n")
 
+                rouge1_med = np.median(rouge1_scores)
+                rouge1_amp = np.amax(rouge1_scores) - np.amin(rouge1_scores)
+                rouge2_med = np.median(rouge2_scores)
+                rouge2_amp = np.amax(rouge2_scores) - np.amin(rouge2_scores)
                 rougel_med = np.median(rougel_scores)
                 rougel_amp = (rougel_scores[rougel_rank[0]] - rougel_scores[rougel_rank[-1]]) / 2.
                 rougel_best = rougel_scores[rougel_rank[0]]
 
+                rouge1_med_avg += rouge1_med
+                rouge1_amp_avg += rouge1_amp
+                rouge2_med_avg += rouge2_med
+                rouge2_amp_avg += rouge2_amp
                 rougel_med_avg += rougel_med
                 rougel_amp_avg += rougel_amp
                 rougel_best_avg += rougel_best
+
+            rouge1_med_avg /= num_examples
+            rouge1_amp_avg /= num_examples
+            rouge2_med_avg /= num_examples
+            rouge2_amp_avg /= num_examples
 
             rougel_med_avg /= num_examples
             rougel_amp_avg /= num_examples
             rougel_best_avg /= num_examples
 
             score_summary = {
+                'rouge1_avg_median': rouge1_med_avg,
+                'rouge1_avg_amplitude': rouge1_amp_avg,
+                'rouge2_avg_median': rouge2_med_avg,
+                'rouge2_avg_amplitude': rouge2_amp_avg,
                 'rougel_avg_median': rougel_med_avg,
                 'rougel_avg_amplitude': rougel_amp_avg,
                 'rougel_avg_best': rougel_best_avg,

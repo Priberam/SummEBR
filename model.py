@@ -14,7 +14,7 @@ import json
 from tqdm import tqdm
 from utils import postprocess_text, replace_special_chars
 
-class BartSummarizer(LightningModule):
+class Summarizer(LightningModule):
     def __init__(
         self,
         model_name_or_path: str,
@@ -24,6 +24,7 @@ class BartSummarizer(LightningModule):
         adam_epsilon: float = 1e-8,
         weight_decay: float = 0.0,
         batch_size: int = 32,
+        accumulate_grad_batches: int = 1,
         num_beams: int = 1,
         num_beam_groups: int = 1,
         diversity_penalty: float = 0.0,
@@ -42,7 +43,7 @@ class BartSummarizer(LightningModule):
             revision='main',
             use_auth_token=None,
         )
-        self.bart = AutoModelForSeq2SeqLM.from_pretrained(
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(
             model_name_or_path,
             from_tf=False,
             config=config,
@@ -57,7 +58,7 @@ class BartSummarizer(LightningModule):
         self.factsumm_scorer = FactSumm()
 
     def forward(self, input_ids, attention_mask, decoder_input_ids=None, labels=None):
-        return self.bart(input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids, labels=labels)
+        return self.model(input_ids, attention_mask=attention_mask, decoder_input_ids=decoder_input_ids, labels=labels)
 
     def training_step(self, batch, batch_idx):
         outputs = self(**batch)
@@ -70,7 +71,7 @@ class BartSummarizer(LightningModule):
         outputs = {}
         outputs['val_loss'] = self(**batch).loss
 
-        preds = self.bart.generate(
+        preds = self.model.generate(
             batch['input_ids'],
             attention_mask=batch['attention_mask'],
             max_length=128).cpu()
@@ -102,16 +103,20 @@ class BartSummarizer(LightningModule):
         return metrics
 
     def test_step(self, batch, batch_idx):
-        preds = self.bart.generate(
+        preds = self.model.generate(
             batch['input_ids'],
             attention_mask=batch['attention_mask'],
+            num_beams=self.hparams.num_beams,
+            num_beam_groups=self.hparams.num_beam_groups,
+            diversity_penalty=self.hparams.diversity_penalty,
+            num_return_sequences=1,
             max_length=128).cpu()
         input_ids = batch['input_ids'].cpu()
         labels = batch['labels'].cpu()
 
         outputs = self.compute_metrics(
             input_ids.numpy(), preds.numpy(), labels.numpy(),
-            metrics=['rouge', 'questeval', 'ctc']
+            metrics=['rouge', 'ctc']
         )
         outputs['batch_size'] = len(input_ids)
         return outputs
@@ -131,14 +136,18 @@ class BartSummarizer(LightningModule):
         self._predict_f = open(self.predictions_file, 'w', encoding='utf-8')
 
     def predict_step(self, batch, batch_idx):
-        preds = self.bart.generate(
+        outputs = self.model.generate(
             batch['input_ids'],
             attention_mask=batch['attention_mask'],
             num_beams=self.hparams.num_beams,
             num_beam_groups=self.hparams.num_beam_groups,
             diversity_penalty=self.hparams.diversity_penalty,
             num_return_sequences=self.hparams.num_return_sequences,
-        ).cpu().numpy()
+            output_scores=True,
+            return_dict_in_generate=True,
+        )
+        preds = outputs['sequences'].cpu().numpy()
+        seq_scores = outputs['sequences_scores'].cpu().numpy()
         input_ids = batch['input_ids'].cpu().numpy()
         labels = [np.where(label != -100, label, self.tokenizer.pad_token_id)
                   for label in batch['labels'].cpu().numpy()]
@@ -153,9 +162,11 @@ class BartSummarizer(LightningModule):
         if self.hparams.num_return_sequences > 1:
             decoded_preds = [decoded_preds[j : j+self.hparams.num_return_sequences]
                              for j in range(0, len(decoded_preds), self.hparams.num_return_sequences)]
+            seq_scores = [seq_scores[j : j+self.hparams.num_return_sequences]
+                          for j in range(0, len(seq_scores), self.hparams.num_return_sequences)]
 
-        for inpt, pred, label in zip(decoded_inputs, decoded_preds, decoded_labels):
-            example = {'text': inpt, 'gold_summary': label}
+        for inpt, pred, label, scores in zip(decoded_inputs, decoded_preds, decoded_labels, seq_scores):
+            example = {'text': inpt, 'gold_summary': label, 'scores': scores.tolist()}
             if self.hparams.num_return_sequences == 1:
                 example['gen_summary'] = pred
             else:
@@ -176,20 +187,19 @@ class BartSummarizer(LightningModule):
         # Calculate total steps
         tb_size = self.hparams.batch_size * max(1, self.trainer.gpus)
         steps_per_epoch = (len(train_loader.dataset) //
-                           tb_size) // self.trainer.accumulate_grad_batches
+                           tb_size) // self.hparams.accumulate_grad_batches
         self.total_steps = self.trainer.max_epochs * steps_per_epoch
 
     def configure_optimizers(self):
         '''Prepare optimizer and schedule (linear warmup and decay)'''
-        model = self.bart
         no_decay = ['bias', 'LayerNorm.weight']
         optimizer_grouped_parameters = [
             {
-                'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                'params': [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
                 'weight_decay': self.hparams.weight_decay,
             },
             {
-                'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                'params': [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
                 'weight_decay': 0.0,
             },
         ]
@@ -365,15 +375,18 @@ class BertRanker(LightningModule):
         tokenizer: AutoTokenizer = None,
         config_name: str = None,
         loss: str = 'listmle',
+        temperature: float = 1.0,
+        margin_weight: float = 10.,
         learning_rate: float = 2e-5,
         adam_epsilon: float = 1e-8,
         weight_decay: float = 0.0,
         batch_size: int = 32,
+        accumulate_grad_batches: int = 1,
         metric: str = 'ctc_sum',
         num_train_samples: int =-1,
         predictions_file: str = 'predictions.jsonl'
     ):
-        assert loss in ['listmle', 'nce']
+        assert loss in ['listmle', 'nce', 'max_margin']
 
         super().__init__()
         self.save_hyperparameters(ignore=['predictions_file'])
@@ -386,7 +399,12 @@ class BertRanker(LightningModule):
             model_name_or_path,
             config=config,
         )
-        self.loss_fn = self.listmle_loss if loss == 'listmle' else self.nce_loss
+        if loss == 'listmle':
+            self.loss_fn = lambda scores, metric_scores, mask: self.listmle_loss(scores, mask, temperature=temperature)
+        elif loss == 'nce':
+            self.loss_fn = lambda scores, metric_scores, mask: self.nce_loss(scores, mask, temperature=temperature)
+        else:
+            self.loss_fn = lambda scores, metric_scores, mask: self.max_margin_loss(scores, metric_scores, mask, temperature=temperature, margin_weight=margin_weight)
         self.predictions_file = predictions_file
 
     def forward(
@@ -417,9 +435,10 @@ class BertRanker(LightningModule):
         return energies, mask
 
     @staticmethod
-    def listmle_loss(scores, mask):
+    def listmle_loss(scores, mask, temperature=1.):
         loss = 0.
         max_num_candidates = mask.sum(dim=1).max().item()
+        scores = scores / temperature
         for i in range(max_num_candidates):
             scores_i = scores[:, i:].clone()
             scores_i -= scores_i.max(dim=1, keepdim=True).values
@@ -432,10 +451,10 @@ class BertRanker(LightningModule):
         return loss
 
     @staticmethod
-    def nce_loss(scores, mask):
+    def nce_loss(scores, mask, temperature=1.):
         N = scores.shape[0]
         with torch.no_grad():
-            probs = scores.exp()  # no need to normalize for torch.multinomial
+            probs = (scores / temperature).exp()  # no need to normalize for torch.multinomial
             probs[~mask] = 0
         indices = torch.multinomial(probs, num_samples=2)
         indices = indices.sort(dim=1).values
@@ -450,6 +469,22 @@ class BertRanker(LightningModule):
         return loss
 
     @staticmethod
+    def max_margin_loss(scores, metric_scores, mask, margin_weight=10., temperature=1000.):
+        N = scores.shape[0]
+        with torch.no_grad():
+            probs = (scores / temperature).exp()  # no need to normalize for torch.multinomial
+            probs[~mask] = 0
+        indices = torch.multinomial(probs, num_samples=2)
+        indices = indices.sort(dim=1).values
+        scores_pos = scores[torch.arange(N), indices[:, 0]]
+        scores_neg = scores[torch.arange(N), indices[:, 1]]
+        metric_scores_pos = metric_scores[torch.arange(N), indices[:, 0]]
+        metric_scores_neg = metric_scores[torch.arange(N), indices[:, 1]]
+        margin = margin_weight * (metric_scores_pos - metric_scores_neg)
+        loss = (margin + scores_neg - scores_pos).clamp(min=0).mean()
+        return loss
+
+    @staticmethod
     def ndcg_metric(scores, mask):
         N, L = scores.shape
         true_relevances = 2**torch.arange(L-1, -1, step=-1).unsqueeze(0).repeat(N, 1) - 1
@@ -459,7 +494,7 @@ class BertRanker(LightningModule):
 
     def training_step(self, batch, batch_idx):
         energies, mask = self(batch)
-        loss = self.loss_fn(-energies, mask)
+        loss = self.loss_fn(-energies, batch['scores'], mask)
         self.log('train_loss', loss)
 
         with torch.no_grad():
@@ -474,7 +509,7 @@ class BertRanker(LightningModule):
     def validation_step(self, batch, batch_idx):
         energies, mask = self(batch)
         outputs = {}
-        outputs['val_loss'] = self.loss_fn(-energies, mask)
+        outputs['val_loss'] = self.loss_fn(-energies, batch['scores'], mask)
 
         preds = energies.argmin(dim=1)
         outputs['val_top1_acc'] = (preds == 0).float().mean()
@@ -532,6 +567,9 @@ class BertRanker(LightningModule):
     def predict_step(self, batch, batch_idx):
         energies, _ = self(batch)
         preds = energies.argmin(dim=1)
+
+        # preds = torch.zeros(len(batch['cand0_ids']), dtype=torch.long)
+        # preds = torch.tensor([(batch['candidate_indices'][i] == 0).nonzero(as_tuple=True)[0] for i in range(len(batch['candidate_indices']))]).squeeze()
         for i, pred in enumerate(preds):
             token_ids = batch[f'cand{pred}_ids'][i]
             type_ids = batch[f'cand{pred}_type_ids'][i]
@@ -559,7 +597,7 @@ class BertRanker(LightningModule):
 
         tb_size = self.hparams.batch_size * max(1, self.trainer.gpus)
         steps_per_epoch = (len(train_loader.dataset) //
-                           tb_size) // self.trainer.accumulate_grad_batches
+                           tb_size) // self.hparams.accumulate_grad_batches
         self.total_steps = self.trainer.max_epochs * steps_per_epoch
 
     def configure_optimizers(self):
@@ -587,3 +625,12 @@ class BertRanker(LightningModule):
         scheduler = {'scheduler': scheduler,
                      'interval': 'step', 'frequency': 1}
         return [optimizer], [scheduler]
+
+    def score(self, document, summary, device='cpu'):
+        example_tok = self.tokenizer(text=document, text_pair=summary, truncation=True, return_overflowing_tokens=False)
+        example_tok = {key: torch.tensor(x).long().unsqueeze(0).to(device) for key, x in example_tok.items()}
+        return self.bert(
+                    input_ids=example_tok['input_ids'],
+                    attention_mask=example_tok['attention_mask'],
+                    token_type_ids=example_tok['token_type_ids'],
+               ).logits
