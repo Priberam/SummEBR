@@ -2,7 +2,7 @@ from pyrsistent import b
 from torch.utils.data import DataLoader, Dataset, Subset
 from pytorch_lightning import LightningDataModule
 import torch
-from datasets import load_from_disk
+from datasets import load_dataset, load_from_disk
 from datasets import Dataset as HF_Dataset
 import transformers
 from transformers import AutoTokenizer, DataCollatorForSeq2Seq, AutoModelForSeq2SeqLM
@@ -14,7 +14,6 @@ import hashlib
 transformers.logging.set_verbosity_warning()
 
 
-
 class SummDataMod(LightningDataModule):
     def __init__(
         self,
@@ -22,26 +21,31 @@ class SummDataMod(LightningDataModule):
         model: AutoModelForSeq2SeqLM,
         tokenizer: AutoTokenizer,
         dataset: str = 'cnndm',
-        max_seq_length: int = 1024,
         batch_size: int = 32,
+        predict_split: str = 'test',
         **kwargs
     ):
         super().__init__()
         self.path = path
-        self.max_seq_length = max_seq_length
         self.batch_size = batch_size
         self.tokenizer = tokenizer
         self.collate_fn = DataCollatorForSeq2Seq(
             tokenizer=tokenizer,
             model=model
         )
+        assert dataset in ['cnndm', 'xsum']
         if dataset == 'cnndm':
             self.loader_columns = ['article', 'highlights']
         else:
             self.loader_columns = ['document', 'summary']
+        assert predict_split in ['test', 'validation', 'train']
+        self.predict_split = predict_split
 
     def prepare_data(self):
-        self.dataset = load_from_disk(self.path)
+        try:
+            self.dataset = load_from_disk(self.path)
+        except:
+            self.dataset = load_dataset('cnn_dailymail', '3.0.0') if self.dataset == 'cnndm' else load_dataset('xsum')
 
         for split in self.dataset.keys():
             self.dataset[split] = self.dataset[split].map(
@@ -60,7 +64,7 @@ class SummDataMod(LightningDataModule):
             x for x in self.dataset.keys() if 'validation' in x]
 
     def train_dataloader(self):
-        return DataLoader(self.dataset['train'], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=False)
+        return DataLoader(self.dataset['train'], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=True)
 
     def val_dataloader(self):
         if len(self.eval_splits) == 1:
@@ -75,18 +79,21 @@ class SummDataMod(LightningDataModule):
             return [DataLoader(self.dataset[x], batch_size=self.batch_size, collate_fn=self.collate_fn, num_workers=4, shuffle=False) for x in self.eval_splits]
 
     def predict_dataloader(self):
-        return self.test_dataloader()
+        if self.predict_split == 'test':
+            return self.test_dataloader()
+        elif self.predict_split == 'validation':
+            return self.val_dataloader()
+        else:
+            return self.train_dataloader()
 
     def convert_to_features(self, example_batch, indices=None):
         document_col, summary_col = self.loader_columns
         inputs = self.tokenizer(
-            # example_batch[document_col], max_length=self.max_seq_length, padding=False, truncation=True
             example_batch[document_col], padding=False, truncation=True
         )
 
         with self.tokenizer.as_target_tokenizer():
             labels = self.tokenizer(
-                # example_batch[summary_col], max_length=self.max_seq_length, padding=False, truncation=True
                 example_batch[summary_col], padding=False, truncation=True
             )
         features = {}
@@ -323,24 +330,3 @@ class DataCollator:
                 [example[key_prefix + '_type_ids'] for example in examples])
 
         return batched_examples
-
-
-if __name__ == '__main__':
-    # transformers.logging.set_verbosity_error()
-    # tokenizer = AutoTokenizer.from_pretrained(
-    #     'bert-base-uncased', use_fast=False)
-    # data = RankDataset('./data/cnndm/rerank_data', 'train', 'rougel', tokenizer)
-    # for i, x in enumerate(data):
-    #     print('scores', x['scores'])
-    #     input()
-    dataset =  SummDataMod(
-        './data/xsum/',
-        None,
-        None,
-        dataset='xsum',
-        max_seq_length=1024,
-        batch_size=1,
-    )
-
-    for i, x in enumerate(dataset):
-        pass

@@ -28,8 +28,6 @@ def main():
                         type=int, metavar='', help='batch size')
     parser.add_argument('--checkpoint', default=None,
                         type=str, metavar='', help='checkpoint file')
-    parser.add_argument('--eval_external_file', default=None,
-                        type=str, metavar='', help='./predictions.jsonl')
     parser.add_argument('--num_beams', default=1,
                         type=int, metavar='', help='number of beams for beam search')
     parser.add_argument('--num_beam_groups', default=1,
@@ -38,11 +36,12 @@ def main():
                         type=int, metavar='', help='number of returned sequences for each input sequence')
     parser.add_argument('--diversity_penalty', default=0.,
                         type=float, metavar='', help='diversity penalty for diverse beam search')
+    parser.add_argument('--predict_split', default='test',
+                        type=str, metavar='', help='data split to generate predictions for')
     parser.add_argument('--predictions_file', default='./predictions.jsonl',
                         type=str, metavar='', help='output predictions file (.jsonl)')
     parser.add_argument('--do_train', dest='do_train', action='store_true')
     parser.add_argument('--do_eval', dest='do_eval', action='store_true')
-    parser.add_argument('--do_eval_external', dest='do_eval_external', action='store_true')
     parser.add_argument('--do_predict', dest='do_predict', action='store_true')
     parser.add_argument('--seed', default=33,
                         type=int, metavar='', help='random seed')
@@ -73,8 +72,8 @@ def main():
         model.model,
         tokenizer,
         dataset=args.dataset,
-        max_seq_length=1024,
         batch_size=args.batch_size,
+        predict_split=args.predict_split,
     )
 
     checkpoint = args.checkpoint
@@ -104,12 +103,6 @@ def main():
             model = Summarizer.load_from_checkpoint(checkpoint)
         trainer = Trainer.from_argparse_args(args)
         trainer.predict(model, datamodule=datamodule)
-
-    if args.do_eval_external:
-        metrics = model.testfromjson(args.eval_external_file, args.batch_size)
-        print(f'Results from input {args.eval_external_file}:')
-        print(metrics)
-
 
 if __name__ == '__main__':
     main()

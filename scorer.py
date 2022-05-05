@@ -9,8 +9,7 @@ from tqdm import tqdm
 from utils import postprocess_text, replace_special_chars
 
 
-ctc_scorer = SummarizationScorer(align='D-xsum')
-ctc_scorer_rel = SummarizationScorer(align='D-cnndm')
+ctc_scorer = SummarizationScorer(align='D-cnndm')
 questeval_scorer = QuestEval(task='summarization', do_weighter=True)
 rouge_scorer = load_metric('rouge')
 
@@ -41,8 +40,7 @@ def compute_ctc_score(inpt, reference, predictions):
     for pred in predictions:
         try:
             consistency = ctc_scorer.score(doc=inpt, refs=[], hypo=pred, aspect='consistency')
-            relevance = ctc_scorer_rel.score(doc=inpt, refs=[reference], hypo=pred, aspect='relevance')
-            # relevance = None
+            relevance = ctc_scorer.score(doc=inpt, refs=[reference], hypo=pred, aspect='relevance')
             consistency_scores.append(consistency if consistency is not None else 0)
             relevance_scores.append(relevance if relevance is not None else 0)
         except:

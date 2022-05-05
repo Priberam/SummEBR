@@ -306,6 +306,67 @@ class Summarizer(LightningModule):
 
         return result
 
+    def show_examples(self, input_ids, labels, preds=None, ofile=None):
+
+        decoded_inputs = self.tokenizer.batch_decode(
+            input_ids, skip_special_tokens=True)
+
+        labels = [np.where(label != -100, label,
+                           self.tokenizer.pad_token_id) for label in labels]
+        decoded_labels = self.tokenizer.batch_decode(
+            labels, skip_special_tokens=True)
+
+        if preds is not None:
+            decoded_preds = self.tokenizer.batch_decode(
+                preds, skip_special_tokens=True)
+        else:
+            decoded_preds = [None] * len(decoded_inputs)
+
+        ofile = ofile or sys.stdout
+        for i, (input, label, pred) in enumerate(zip(decoded_inputs, decoded_labels, decoded_preds)):
+            print(f'Article {i}:', file=ofile)
+            print(input, file=ofile)
+            print(file=ofile)
+
+            print(f'Ref. summary {i}:', file=ofile)
+            print(label, file=ofile)
+            print(file=ofile)
+
+            if pred is not None:
+                print(f'Gen. summary {i}:', file=ofile)
+                print(pred, file=ofile)
+                print(file=ofile)
+
+    def testfromjson(self, filename, batch_size):
+        with open(filename, 'r', encoding='utf-8') as fd:
+            lines = fd.readlines()
+        examples = [json.loads(line) for line in tqdm(lines)]
+
+        outputs, input_batch, pred_batch, label_batch = [], [], [], []
+        for example in tqdm(examples):
+            input_batch.append(example['text'])
+            pred_batch.append(example['gen_summary'])
+            label_batch.append(example['gold_summary'])
+
+            if len(input_batch) == batch_size:
+                output = self.compute_metrics(input_batch, pred_batch, label_batch, metrics=['rouge', 'questeval', 'ctc'], input_is_text=True)
+                output['batch_size'] = batch_size
+                outputs.append(output)
+                input_batch, pred_batch, label_batch = [], [], []
+        if(input_batch):
+            output = self.compute_metrics(input_batch, pred_batch, label_batch, metrics=['rouge', 'questeval', 'ctc'], input_is_text=True)
+            output['batch_size'] = len(input_batch)
+            outputs.append(output)
+
+        metrics = {}
+        num_examples = sum(x['batch_size'] for x in outputs)
+        for key in outputs[0].keys():
+            if key == 'batch_size':
+                continue
+            metrics[key] = sum(x[key] * x['batch_size']
+                               for x in outputs) / num_examples
+        return metrics
+
 
 class BertRanker(LightningModule):
     def __init__(

@@ -87,9 +87,9 @@ def main():
             model = BertRanker.load_from_checkpoint(checkpoint)
 
         checkpoint_callback = ModelCheckpoint(
-            monitor='val_top1_acc',
+            monitor='val_ndcg',
             dirpath=args.output,
-            filename=f'bert-ranker-{args.metric}-{args.loss}-'+'{epoch:02d}-{val_ndcg:.2f}',
+            filename=f'ebr-{args.metric}-{args.loss}-'+'{epoch:02d}-{val_ndcg:.2f}',
             save_top_k=3,
             mode='max',
         )
