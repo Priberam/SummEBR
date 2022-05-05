@@ -1,0 +1,15 @@
+ctc_score==0.1.1
+ctc_score.egg==info
+datasets==1.18.3
+factsumm==0.1.2
+model==0.6.0
+nltk==3.6.4
+numpy==1.19.5
+pyrsistent==0.18.1
+pytorch_lightning==1.4.9
+questeval==0.2.4
+questeval.egg==info
+scikit_learn==1.0.2
+torch==1.10.2+cu113
+tqdm==4.62.3
+transformers==4.15.0
