@@ -5,7 +5,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 from transformers import AutoTokenizer
 from dataset import RankDataMod
-from model import BertRanker
+from models import BertRanker
 
 
 def main():

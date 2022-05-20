@@ -3,7 +3,7 @@ from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from transformers import AutoTokenizer
 from dataset import SummDataMod
-from model import Summarizer
+from models import Summarizer
 
 
 def main():

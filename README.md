@@ -30,7 +30,7 @@ To reproduce the experiments:
 
 2. Use the desired EBR model to rank the test candidates. E.g.:
 
-        python run_ranker.py --do_predict --gpus=1 -d ./data/cnndm/bart --metric=ctc_sum --checkpoint=./checkpoints/cnndm/bart/ebr-ctc_sum.pt --predictions_file=./data/cnndm/ebr-ctc_sum-predictions.jsonl
+        python run_ranker.py --do_predict --gpus=1 -d ./data/cnndm/bart --metric=ctc_sum --checkpoint=./checkpoints/cnndm/bart/ebr-ctc_sum.ckpt --predictions_file=./data/cnndm/ebr-ctc_sum-predictions.jsonl
 
 3. Get the results. E.g.:
 
