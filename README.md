@@ -1,7 +1,7 @@
 # EBR
 
-Source code for the paper 'Improving abstractive summarization via energy-based re-ranking' (Anonymous submission).
-Submitted to **COLING 2022**.
+Source code for the paper 'Improving abstractive summarization via energy-based re-ranking' (D. Pernes, A. Mendes, and A. F. T. Martins).
+Presented at the 2nd Workshop on Natural Language Generation, Evaluation, and Metrics **(GEM 2022)**.
 
 ## Training
 
@@ -26,11 +26,11 @@ To reproduce the experiments:
 
     2. Compute ROUGE, QuestEval, and CTC scores for the test data you want to evaluate. E.g.:
 
-            python scorer.py --source=./data/cnndm/bart/diverse-samples-test.jsonl --results_rouge==./data/cnndm/bart/results-rougel-test.jsonl --results_questeval==./data/cnndm/bart/results-questeval-test.jsonl --results_ctc==./data/cnndm/bart/results-ctc-test.jsonl
+            python scorer.py --source=./data/cnndm/bart/diverse-samples-test.jsonl --results_rouge=./data/cnndm/bart/results-rougel-test.jsonl --results_questeval=./data/cnndm/bart/results-questeval-test.jsonl --results_ctc=./data/cnndm/bart/results-ctc-test.jsonl
 
 2. Use the desired EBR model to rank the test candidates. E.g.:
 
-        python run_ranker.py --do_predict --gpus=1 -d ./data/cnndm/bart --metric=ctc_sum --checkpoint=./checkpoints/cnndm/bart/ebr-ctc_sum.ckpt --predictions_file=./data/cnndm/ebr-ctc_sum-predictions.jsonl
+        python run-ranker.py --do_predict --gpus=1 -d ./data/cnndm/bart --metric=ctc_sum --checkpoint=./checkpoints/cnndm/bart/ebr-ctc_sum.ckpt --predictions_file=./data/cnndm/ebr-ctc_sum-predictions.jsonl
 
 3. Get the results. E.g.:
 
