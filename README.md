@@ -9,7 +9,7 @@ If you wish to use the code, please read the attached **LICENSE.md**.
 
 Training the EBR model involves the following steps:
 
-1. Sampling candidates from an abstractive summarization model (BART or PEGASUS):
+1. Sampling candidates from an abstractive summarization model (BART or PEGASUS).
 
 2. Scoring and ranking candidates according to the desired metric.
 
@@ -19,7 +19,10 @@ We provide a customizable `train.sh` script that can be used to train the EBR mo
 
 ## Testing
 
-We provide the model checkpoints and the candidate summaries used in the experimental evaluation.
+We provide the model checkpoints and the candidate summaries used in the experimental evaluation. To download them, run:
+
+    curl ftp://ftp.priberam.com/EBR/ebr_models.tar.gz --user "ftp.priberam.com|anonymous":anonymous -o ./ebr_models.tar.gz
+
 To reproduce the experiments:
 
 1. If you haven't trained the model and want to use the data and checkpoints we provide:
