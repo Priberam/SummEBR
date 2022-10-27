@@ -21,7 +21,7 @@ We provide a customizable `train.sh` script that can be used to train the EBR mo
 
 We provide the model checkpoints and the candidate summaries used in the experimental evaluation. To download them, run:
 
-    curl ftp://ftp.priberam.com/EBR/ebr_models.tar.gz --user "ftp.priberam.com|anonymous":anonymous -o ./ebr_models.tar.gz
+    curl ftp://ftp.priberam.com/SummEBR/ebr_models.tar.gz --user "ftp.priberam.com|anonymous":anonymous -o ./ebr_models.tar.gz
 
 To reproduce the experiments:
 
