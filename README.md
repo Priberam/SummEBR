@@ -1,6 +1,6 @@
 # SummEBR
 
-Source code for the paper ["Improving abstractive summarization via energy-based re-ranking"](https://arxiv.org/abs/2210.15553) (D. Pernes, A. Mendes, and A. F. T. Martins).
+Source code for the paper ["Improving abstractive summarization with energy-based re-ranking"](https://arxiv.org/abs/2210.15553) (D. Pernes, A. Mendes, and A. F. T. Martins).
 Presented at the *2nd Workshop on Natural Language Generation, Evaluation, and Metrics* **(GEM 2022)**.
 
 If you wish to use the code, please read the attached **LICENSE.md**.
