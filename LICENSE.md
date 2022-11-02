@@ -1,6 +1,6 @@
 The 3-Clause BSD License
 
-For Priberam Clustering Software
+For Priberam Abstractive Summarization Software
 
 Copyright 2022 by PRIBERAM INFORMÁTICA, S.A. (“PRIBERAM”) (www.priberam.com)
 
