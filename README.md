@@ -1,7 +1,7 @@
 # SummEBR
 
-Source code for the paper ["Improving abstractive summarization with energy-based re-ranking"](https://arxiv.org/abs/2210.15553) (D. Pernes, A. Mendes, and A. F. T. Martins).
-Presented at the *2nd Workshop on Natural Language Generation, Evaluation, and Metrics* **(GEM Workshop 2022)**.
+Source code for the paper ["Improving abstractive summarization with energy-based re-ranking"](https://aclanthology.org/2022.gem-1.1/) (D. Pernes, A. Mendes, and A. F. T. Martins).
+Presented at the *2nd Workshop on Natural Language Generation, Evaluation, and Metrics* **(GEM 2022)**.
 
 If you wish to use the code, please read the attached **LICENSE.md**.
 
@@ -40,3 +40,19 @@ To reproduce the experiments:
 3. Get the results. E.g.:
 
         python score-ranked.py --predictions=./data/cnndm/ebr-ctc_sum-predictions.jsonl --scores_rouge=./data/results-rougel-test.jsonl --scores_questeval=./data/results-questeval-test.jsonl --scores_ctc=./data/results-ctc-test.jsonl
+
+## Citation
+
+        @inproceedings{pernes-etal-2022-improving,
+            title = "Improving abstractive summarization with energy-based re-ranking",
+            author = "Pernes, Diogo  and
+              Mendes, Afonso  and
+              Martins, Andr{\'e} F. T.",
+            booktitle = "Proceedings of the 2nd Workshop on Natural Language Generation, Evaluation, and Metrics (GEM)",
+            month = dec,
+            year = "2022",
+            address = "Abu Dhabi, United Arab Emirates (Hybrid)",
+            publisher = "Association for Computational Linguistics",
+            url = "https://aclanthology.org/2022.gem-1.1",
+            pages = "1--17",
+        }
